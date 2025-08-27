@@ -19,6 +19,9 @@ pypdf
 # OpenAI
 openai
 
+# Database integration
+supabase
+
 # Additional utilities
 pydantic
 python-dotenv
