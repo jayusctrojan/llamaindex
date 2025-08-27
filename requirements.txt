@@ -1,0 +1,24 @@
+# FastAPI and web server
+fastapi
+uvicorn
+python-multipart
+aiofiles
+
+# LlamaIndex core
+llama-index
+llama-index-core
+llama-index-llms-openai
+llama-index-embeddings-openai
+llama-index-readers-file
+
+# Document processing
+PyPDF2
+python-docx
+pypdf
+
+# OpenAI
+openai
+
+# Additional utilities
+pydantic
+python-dotenv
