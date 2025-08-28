@@ -16,11 +16,18 @@ PyPDF2
 python-docx
 pypdf
 
-# OpenAI
-openai
+# LangExtract for structured extraction with source grounding
+langextract
 
-# Database integration
-supabase
+# Vector database
+pinecone
+
+# Backblaze B2 storage
+b2sdk
+
+# OpenAI and Hyperbolic integration
+openai
+httpx
 
 # Additional utilities
 pydantic
