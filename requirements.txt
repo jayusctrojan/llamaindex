@@ -28,6 +28,9 @@ b2sdk
 # Airtable for document tracking (replaces Supabase)
 requests
 
+# YouTube processing
+yt-dlp
+
 # OpenAI and Hyperbolic integration
 openai
 httpx

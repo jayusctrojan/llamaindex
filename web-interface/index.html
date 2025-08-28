@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>YouTube Content Processor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>YouTube Content Processor</h1>
+        <form id="youtubeForm">
+            <input type="url" name="url" placeholder="YouTube URL" required>
+            <select name="content_type">
+                <option value="video">Video</option>
+                <option value="course">Course</option>
+                <option value="podcast">Podcast</option>
+            </select>
+            <input type="text" name="primary_category" placeholder="Primary Category">
+            <input type="text" name="secondary_category" placeholder="Secondary Category">
+            <select name="extract_method">
+                <option value="transcript">YouTube Transcript</option>
+                <option value="whisper">Whisper AI</option>
+                <option value="both">Try Both</option>
+            </select>
+            <button type="submit">Process Video</button>
+        </form>
+        <div id="result"></div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
