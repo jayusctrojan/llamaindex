@@ -29,6 +29,9 @@ b2sdk
 openai
 httpx
 
+# Lakera Guard for AI security
+requests
+
 # Additional utilities
 pydantic
 python-dotenv

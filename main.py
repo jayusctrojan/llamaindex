@@ -28,6 +28,15 @@ except ImportError as e:
     print(f"LangExtract not available: {e}")
     LANGEXTRACT_AVAILABLE = False
 
+# Supabase imports
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+    print("SUCCESS: Supabase imported successfully")
+except ImportError as e:
+    print(f"WARNING: Could not import Supabase: {e}")
+    SUPABASE_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,6 +64,14 @@ B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME")
 # Pinecone configuration
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "course-knowledge")
+
+# Lakera Guard configuration
+LAKERA_API_KEY = os.getenv("LAKERA_API_KEY")
+LAKERA_BASE_URL = "https://api.lakera.ai/v1"
+
+# Supabase configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 # Pinecone imports
 try:
@@ -86,6 +103,229 @@ except ImportError as e:
     print(f"B2SDK not available: {e}")
     B2_AVAILABLE = False
     bucket = None
+
+class LakeraGuard:
+    """Lakera Guard integration for AI security"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = LAKERA_BASE_URL
+        self.available = bool(api_key)
+    
+    async def screen_input(self, text: str, user_id: str = "anonymous") -> dict:
+        """Screen user input for security threats"""
+        if not self.available:
+            return {"safe": True, "message": "Security screening disabled"}
+        
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "input": text,
+                "response_categories": [
+                    "prompt_injection",
+                    "jailbreak", 
+                    "pii",
+                    "toxic"
+                ],
+                "user_id": user_id
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/detect",
+                    headers=headers,
+                    json=payload,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                return {
+                    "safe": not result.get("flagged", False),
+                    "categories": result.get("categories", []),
+                    "message": "Input screened successfully",
+                    "lakera_response": result
+                }
+                
+        except Exception as e:
+            logger.error(f"Lakera Guard screening error: {e}")
+            # Fail open - allow processing if security check fails
+            return {"safe": True, "message": f"Security check failed: {e}"}
+    
+    async def screen_output(self, text: str) -> dict:
+        """Screen AI output before returning to user"""
+        if not self.available:
+            return {"safe": True, "message": "Output screening disabled"}
+            
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "input": text,
+                "response_categories": [
+                    "pii",
+                    "toxic",
+                    "hate",
+                    "self_harm"
+                ]
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/detect",
+                    headers=headers,
+                    json=payload,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                return {
+                    "safe": not result.get("flagged", False),
+                    "categories": result.get("categories", []),
+                    "message": "Output screened successfully",
+                    "lakera_response": result
+                }
+                
+        except Exception as e:
+            logger.error(f"Lakera Guard output screening error: {e}")
+            # Fail open - allow output if security check fails
+            return {"safe": True, "message": f"Output security check failed: {e}"}
+
+class DocumentProcessingLogger:
+    """Logs document processing activities to Supabase"""
+    
+    def __init__(self):
+        self.available = False
+        
+        if not SUPABASE_AVAILABLE:
+            print("WARNING: Supabase not available, processing logging disabled")
+            return
+            
+        try:
+            if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+                print("WARNING: Supabase credentials missing, processing logging disabled")
+                return
+                
+            self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            self.available = True
+            print("SUCCESS: Supabase document processing logger initialized")
+            
+        except Exception as e:
+            print(f"ERROR: Failed to initialize Supabase client: {e}")
+            self.available = False
+    
+    async def log_processing_start(self, filename: str, file_size: int, user_id: str = "system") -> str:
+        """Log the start of document processing"""
+        if not self.available:
+            return None
+            
+        try:
+            processing_data = {
+                "filename": filename,
+                "file_size": file_size,
+                "user_id": user_id,
+                "status": "processing",
+                "started_at": datetime.now().isoformat(),
+                "service_name": "llamaindex-processor"
+            }
+            
+            result = self.supabase.table("document_processing_log").insert(processing_data).execute()
+            processing_id = result.data[0]["id"] if result.data else None
+            
+            print(f"SUCCESS: Logged processing start for {filename} (ID: {processing_id})")
+            return processing_id
+            
+        except Exception as e:
+            print(f"ERROR: Failed to log processing start: {e}")
+            return None
+    
+    async def log_processing_complete(self, processing_id: str, chunks_created: int, 
+                                    processing_summary: dict, classification: dict = None,
+                                    security_result: dict = None) -> bool:
+        """Log successful completion of document processing"""
+        if not self.available or not processing_id:
+            return False
+            
+        try:
+            update_data = {
+                "status": "completed",
+                "completed_at": datetime.now().isoformat(),
+                "chunks_created": chunks_created,
+                "processing_summary": processing_summary,
+                "classification": classification or {},
+                "security_result": security_result or {"safe": True, "message": "No security screening"}
+            }
+            
+            self.supabase.table("document_processing_log").update(update_data).eq("id", processing_id).execute()
+            
+            print(f"SUCCESS: Logged processing completion for ID {processing_id}")
+            return True
+            
+        except Exception as e:
+            print(f"ERROR: Failed to log processing completion: {e}")
+            return False
+    
+    async def log_processing_error(self, processing_id: str, error_message: str) -> bool:
+        """Log processing failure"""
+        if not self.available or not processing_id:
+            return False
+            
+        try:
+            update_data = {
+                "status": "failed",
+                "completed_at": datetime.now().isoformat(),
+                "error_message": error_message
+            }
+            
+            self.supabase.table("document_processing_log").update(update_data).eq("id", processing_id).execute()
+            
+            print(f"SUCCESS: Logged processing error for ID {processing_id}")
+            return True
+            
+        except Exception as e:
+            print(f"ERROR: Failed to log processing error: {e}")
+            return False
+    
+    async def get_processing_stats(self) -> dict:
+        """Get processing statistics from Supabase"""
+        if not self.available:
+            return {"error": "Supabase not available"}
+            
+        try:
+            # Get recent processing stats
+            result = self.supabase.table("document_processing_log")\
+                .select("status, chunks_created, file_size, created_at")\
+                .order("created_at", desc=True)\
+                .limit(100)\
+                .execute()
+            
+            if not result.data:
+                return {"total_processed": 0, "success_rate": 0}
+            
+            total = len(result.data)
+            successful = len([r for r in result.data if r.get("status") == "completed"])
+            total_chunks = sum(r.get("chunks_created", 0) for r in result.data if r.get("chunks_created"))
+            
+            return {
+                "total_processed": total,
+                "successful": successful,
+                "failed": total - successful,
+                "success_rate": round((successful / total * 100), 2) if total > 0 else 0,
+                "total_chunks_created": total_chunks,
+                "recent_activity": result.data[:10]
+            }
+            
+        except Exception as e:
+            print(f"ERROR: Failed to get processing stats: {e}")
+            return {"error": f"Failed to get stats: {e}"}
 
 class HyperbolicLLM:
     """Custom LLM wrapper for Hyperbolic.ai"""
@@ -124,7 +364,7 @@ class HyperbolicLLM:
                 raise HTTPException(status_code=500, detail=f"Hyperbolic API error: {e}")
 
 class DocumentProcessor:
-    """Document processing with LlamaIndex + Hyperbolic.ai + LangExtract"""
+    """Document processing with LlamaIndex + Hyperbolic.ai + LangExtract + Lakera Security"""
     
     def __init__(self):
         self.available = False
@@ -150,6 +390,20 @@ class DocumentProcessor:
             self.lang_extractor = None
             logger.warning("LangExtract not available or Hyperbolic API key missing")
         
+        # Initialize Lakera Guard for security
+        self.lakera_guard = LakeraGuard(LAKERA_API_KEY) if LAKERA_API_KEY else None
+        if self.lakera_guard and self.lakera_guard.available:
+            logger.info("Lakera Guard security enabled")
+        else:
+            logger.warning("Lakera Guard not configured - security screening disabled")
+        
+        # Initialize Supabase logger
+        self.supabase_logger = DocumentProcessingLogger()
+        if self.supabase_logger.available:
+            logger.info("Supabase document processing logging enabled")
+        else:
+            logger.warning("Supabase logging not available")
+        
         # Set up OpenAI for embeddings (still need this for LlamaIndex)
         if os.getenv("OPENAI_API_KEY"):
             Settings.embed_model = OpenAIEmbedding()
@@ -171,13 +425,73 @@ class DocumentProcessor:
             logger.error(f"LangExtract setup failed: {e}")
             return None
     
-    async def process_document(self, file_path: str, content: bytes, filename: str) -> dict:
-        """Process document with LlamaIndex, enhance with Hyperbolic.ai, and extract structured data with LangExtract"""
+    async def process_document(self, file_path: str, content: bytes, filename: str, user_id: str = "system") -> dict:
+        """Process document with full pipeline: Lakera Security + LlamaIndex + LangExtract + Hyperbolic + Supabase Logging"""
         if not self.available:
             raise HTTPException(status_code=503, detail="Document processor not available")
         
+        # Initialize processing ID for logging
+        processing_id = None
+        
         try:
-            # Step 1: Extract text with LlamaIndex
+            # Step 0: Start Supabase logging
+            if self.supabase_logger.available:
+                processing_id = await self.supabase_logger.log_processing_start(
+                    filename=filename,
+                    file_size=len(content),
+                    user_id=user_id
+                )
+            
+            # Step 1: Security screening of filename and initial content
+            if self.lakera_guard and self.lakera_guard.available:
+                # Screen filename for potential security issues
+                filename_check = await self.lakera_guard.screen_input(filename, user_id)
+                if not filename_check["safe"]:
+                    if processing_id:
+                        await self.supabase_logger.log_processing_error(
+                            processing_id, f"Filename blocked by security: {filename_check['categories']}"
+                        )
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Filename blocked by security: {filename_check['categories']}"
+                    )
+                
+                # Screen initial content sample for security
+                content_sample = content[:1000].decode('utf-8', errors='ignore')
+                content_check = await self.lakera_guard.screen_input(content_sample, user_id)
+                if not content_check["safe"]:
+                    if processing_id:
+                        await self.supabase_logger.log_processing_error(
+                            processing_id, f"Content blocked by security: {content_check['categories']}"
+                        )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Content blocked by security: {content_check['categories']}"
+                    )
+                    
+                logger.info(f"Content passed Lakera Guard security screening: {filename}")
+            
+            # Step 2: Extract text with LlamaIndex
+            if filename.endswith('.pdf'):
+                # Save file temporarily for processing
+                with open(f"/tmp/{filename}", "wb") as f:
+                    f.write(content)
+                documents = self.pdf_reader.load_data(f"/tmp/{filename}")
+                os.remove(f"/tmp/{filename}")
+            elif filename.endswith('.docx'):
+                with open(f"/tmp/{filename}", "wb") as f:
+                    f.write(content)
+                documents = self.docx_reader.load_data(f"/tmp/{filename}")
+                os.remove(f"/tmp/{filename}")
+            else:
+                # Plain text processing
+                text = content.decode('utf-8')
+                documents = [Document(text=text)]
+            
+            # Step 3: Parse into nodes/chunks
+            nodes = self.node_parser.get_nodes_from_documents(documents)
+            
+            # Step 4: Process each chunk with LangExtract + Hyperbolic
             if filename.endswith('.pdf'):
                 # Save file temporarily for processing
                 with open(f"/tmp/{filename}", "wb") as f:
@@ -264,20 +578,50 @@ class DocumentProcessor:
                 
                 processed_chunks.append(chunk_data)
             
+            # Step 5: Security screening of final output
+            security_result = {"safe": True, "message": "No security screening"}
+            if self.lakera_guard and self.lakera_guard.available:
+                # Screen the processed content for potential issues
+                output_sample = str(processed_chunks)[:2000]  # Sample for screening
+                output_check = await self.lakera_guard.screen_output(output_sample)
+                security_result = output_check
+                
+                if not output_check["safe"]:
+                    logger.warning(f"Processed content flagged by Lakera Guard: {output_check['categories']}")
+                    # Still allow processing but flag for review
+            
+            # Step 6: Log successful completion to Supabase
+            processing_summary = {
+                "llamaindex_chunks": len(nodes),
+                "langextract_processed": sum(1 for c in processed_chunks if c.get("structured_extraction")),
+                "hyperbolic_enhanced": sum(1 for c in processed_chunks if c.get("ai_analysis"))
+            }
+            
+            if processing_id and self.supabase_logger.available:
+                await self.supabase_logger.log_processing_complete(
+                    processing_id=processing_id,
+                    chunks_created=len(processed_chunks),
+                    processing_summary=processing_summary,
+                    classification=None,  # Add classification if you implement it
+                    security_result=security_result
+                )
+            
             return {
                 "status": "success",
                 "filename": filename,
                 "total_chunks": len(processed_chunks),
                 "chunks": processed_chunks,
-                "processing_summary": {
-                    "llamaindex_chunks": len(nodes),
-                    "langextract_processed": sum(1 for c in processed_chunks if c.get("structured_extraction")),
-                    "hyperbolic_enhanced": sum(1 for c in processed_chunks if c.get("ai_analysis"))
-                },
+                "processing_summary": processing_summary,
+                "security": security_result,
+                "processing_id": processing_id,
                 "processed_at": datetime.now().isoformat()
             }
             
         except Exception as e:
+            # Log error to Supabase if possible
+            if processing_id and self.supabase_logger.available:
+                await self.supabase_logger.log_processing_error(processing_id, str(e))
+            
             logger.error(f"Document processing error: {e}")
             raise HTTPException(status_code=500, detail=f"Processing error: {e}")
     
@@ -384,7 +728,8 @@ async def root():
         "status": "running",
         "version": "1.0.0",
         "hyperbolic_enabled": bool(HYPERBOLIC_API_KEY),
-        "llamaindex_available": LLAMAINDEX_AVAILABLE
+        "llamaindex_available": LLAMAINDEX_AVAILABLE,
+        "security_enabled": bool(LAKERA_API_KEY)
     }
 
 @app.get("/health")
@@ -398,6 +743,8 @@ async def health():
             "hyperbolic": bool(HYPERBOLIC_API_KEY),
             "backblaze": B2_AVAILABLE,
             "pinecone": PINECONE_AVAILABLE,
+            "lakera_guard": bool(LAKERA_API_KEY),
+            "supabase": SUPABASE_AVAILABLE and bool(SUPABASE_URL and SUPABASE_ANON_KEY),
             "document_processor": document_processor.available
         }
     }
@@ -407,9 +754,10 @@ async def process_course_material(
     file: UploadFile = File(...),
     course_name: str = Form(...),
     module_name: str = Form(default=""),
-    industry: str = Form(default="auto-detect")
+    industry: str = Form(default="auto-detect"),
+    user_id: str = Form(default="anonymous")
 ):
-    """Process course material with enhanced classification for AI departments"""
+    """Process course material with enhanced classification and security screening"""
     
     if not document_processor.available:
         raise HTTPException(status_code=503, detail="Document processor not available")
@@ -417,11 +765,12 @@ async def process_course_material(
     try:
         content = await file.read()
         
-        # Enhanced processing with course context
+        # Enhanced processing with course context and security
         result = await document_processor.process_document(
             file_path=f"courses/{course_name}/{module_name}/{file.filename}",
             content=content,
-            filename=file.filename
+            filename=file.filename,
+            user_id=user_id
         )
         
         # Add course-specific metadata
@@ -430,7 +779,8 @@ async def process_course_material(
             "module_name": module_name,
             "requested_industry": industry,
             "detected_industry": result.get("classification", {}).get("industry", "unknown"),
-            "department_recommendations": result.get("classification", {}).get("department_relevance", [])
+            "department_recommendations": result.get("classification", {}).get("department_relevance", []),
+            "user_id": user_id
         }
         
         return result
@@ -571,6 +921,25 @@ async def get_knowledge_statistics():
         
     except Exception as e:
         logger.error(f"Stats error: {e}")
+        raise HTTPException(status_code=500, detail=f"Stats error: {e}")
+
+@app.get("/stats/processing")
+async def get_processing_statistics():
+    """Get document processing statistics from Supabase"""
+    
+    if not document_processor.supabase_logger.available:
+        raise HTTPException(status_code=503, detail="Supabase logging not available")
+    
+    try:
+        stats = await document_processor.supabase_logger.get_processing_stats()
+        return {
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "statistics": stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get processing stats: {e}")
         raise HTTPException(status_code=500, detail=f"Stats error: {e}")
 
 @app.post("/extract")
