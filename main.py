@@ -228,30 +228,34 @@ class DocumentProcessingLogger:
             return None
             
         try:
+            # Generate a unique session ID
+            import uuid
+            session_id = str(uuid.uuid4())
+            
             processing_data = {
+                "session_id": session_id,
                 "filename": filename,
-                "file_size": file_size,
+                "file_size_bytes": file_size,
                 "user_id": user_id,
                 "status": "processing",
                 "started_at": datetime.now().isoformat(),
-                "service_name": "llamaindex-processor"
+                "service": "llamaindex-processor"
             }
             
             result = self.supabase.table("document_processing_log").insert(processing_data).execute()
-            processing_id = result.data[0]["id"] if result.data else None
             
-            print(f"SUCCESS: Logged processing start for {filename} (ID: {processing_id})")
-            return processing_id
+            print(f"SUCCESS: Logged processing start for {filename} (Session: {session_id})")
+            return session_id
             
         except Exception as e:
             print(f"ERROR: Failed to log processing start: {e}")
             return None
     
-    async def log_processing_complete(self, processing_id: str, chunks_created: int, 
+    async def log_processing_complete(self, session_id: str, chunks_created: int, 
                                     processing_summary: dict, classification: dict = None,
-                                    security_result: dict = None) -> bool:
+                                    security_result: dict = None, processing_time: float = None) -> bool:
         """Log successful completion of document processing"""
-        if not self.available or not processing_id:
+        if not self.available or not session_id:
             return False
             
         try:
@@ -264,18 +268,21 @@ class DocumentProcessingLogger:
                 "security_result": security_result or {"safe": True, "message": "No security screening"}
             }
             
-            self.supabase.table("document_processing_log").update(update_data).eq("id", processing_id).execute()
+            if processing_time:
+                update_data["processing_time_seconds"] = processing_time
             
-            print(f"SUCCESS: Logged processing completion for ID {processing_id}")
+            self.supabase.table("document_processing_log").update(update_data).eq("session_id", session_id).execute()
+            
+            print(f"SUCCESS: Logged processing completion for session {session_id}")
             return True
             
         except Exception as e:
             print(f"ERROR: Failed to log processing completion: {e}")
             return False
     
-    async def log_processing_error(self, processing_id: str, error_message: str) -> bool:
+    async def log_processing_error(self, session_id: str, error_message: str) -> bool:
         """Log processing failure"""
-        if not self.available or not processing_id:
+        if not self.available or not session_id:
             return False
             
         try:
@@ -285,9 +292,9 @@ class DocumentProcessingLogger:
                 "error_message": error_message
             }
             
-            self.supabase.table("document_processing_log").update(update_data).eq("id", processing_id).execute()
+            self.supabase.table("document_processing_log").update(update_data).eq("session_id", session_id).execute()
             
-            print(f"SUCCESS: Logged processing error for ID {processing_id}")
+            print(f"SUCCESS: Logged processing error for session {session_id}")
             return True
             
         except Exception as e:
@@ -302,7 +309,7 @@ class DocumentProcessingLogger:
         try:
             # Get recent processing stats
             result = self.supabase.table("document_processing_log")\
-                .select("status, chunks_created, file_size, created_at")\
+                .select("status, chunks_created, file_size_bytes, created_at")\
                 .order("created_at", desc=True)\
                 .limit(100)\
                 .execute()
@@ -430,13 +437,14 @@ class DocumentProcessor:
         if not self.available:
             raise HTTPException(status_code=503, detail="Document processor not available")
         
-        # Initialize processing ID for logging
-        processing_id = None
+        # Initialize processing session for logging
+        session_id = None
+        processing_start_time = datetime.now()
         
         try:
             # Step 0: Start Supabase logging
             if self.supabase_logger.available:
-                processing_id = await self.supabase_logger.log_processing_start(
+                session_id = await self.supabase_logger.log_processing_start(
                     filename=filename,
                     file_size=len(content),
                     user_id=user_id
@@ -447,9 +455,9 @@ class DocumentProcessor:
                 # Screen filename for potential security issues
                 filename_check = await self.lakera_guard.screen_input(filename, user_id)
                 if not filename_check["safe"]:
-                    if processing_id:
+                    if session_id:
                         await self.supabase_logger.log_processing_error(
-                            processing_id, f"Filename blocked by security: {filename_check['categories']}"
+                            session_id, f"Filename blocked by security: {filename_check['categories']}"
                         )
                     raise HTTPException(
                         status_code=400, 
@@ -460,9 +468,9 @@ class DocumentProcessor:
                 content_sample = content[:1000].decode('utf-8', errors='ignore')
                 content_check = await self.lakera_guard.screen_input(content_sample, user_id)
                 if not content_check["safe"]:
-                    if processing_id:
+                    if session_id:
                         await self.supabase_logger.log_processing_error(
-                            processing_id, f"Content blocked by security: {content_check['categories']}"
+                            session_id, f"Content blocked by security: {content_check['categories']}"
                         )
                     raise HTTPException(
                         status_code=400,
@@ -597,13 +605,17 @@ class DocumentProcessor:
                 "hyperbolic_enhanced": sum(1 for c in processed_chunks if c.get("ai_analysis"))
             }
             
-            if processing_id and self.supabase_logger.available:
+            # Calculate processing time
+            processing_time = (datetime.now() - processing_start_time).total_seconds()
+            
+            if session_id and self.supabase_logger.available:
                 await self.supabase_logger.log_processing_complete(
-                    processing_id=processing_id,
+                    session_id=session_id,
                     chunks_created=len(processed_chunks),
                     processing_summary=processing_summary,
                     classification=None,  # Add classification if you implement it
-                    security_result=security_result
+                    security_result=security_result,
+                    processing_time=processing_time
                 )
             
             return {
@@ -613,14 +625,15 @@ class DocumentProcessor:
                 "chunks": processed_chunks,
                 "processing_summary": processing_summary,
                 "security": security_result,
-                "processing_id": processing_id,
+                "session_id": session_id,
+                "processing_time_seconds": processing_time,
                 "processed_at": datetime.now().isoformat()
             }
             
         except Exception as e:
             # Log error to Supabase if possible
-            if processing_id and self.supabase_logger.available:
-                await self.supabase_logger.log_processing_error(processing_id, str(e))
+            if session_id and self.supabase_logger.available:
+                await self.supabase_logger.log_processing_error(session_id, str(e))
             
             logger.error(f"Document processing error: {e}")
             raise HTTPException(status_code=500, detail=f"Processing error: {e}")
