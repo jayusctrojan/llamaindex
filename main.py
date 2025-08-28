@@ -28,20 +28,20 @@ except ImportError as e:
     print(f"LangExtract not available: {e}")
     LANGEXTRACT_AVAILABLE = False
 
-# Supabase imports
+# Airtable imports
 try:
-    from supabase import create_client, Client
-    SUPABASE_AVAILABLE = True
-    print("SUCCESS: Supabase imported successfully")
+    import requests
+    AIRTABLE_AVAILABLE = True
+    print("SUCCESS: Airtable integration ready")
 except ImportError as e:
-    print(f"WARNING: Could not import Supabase: {e}")
-    SUPABASE_AVAILABLE = False
+    print(f"WARNING: Could not import requests for Airtable: {e}")
+    AIRTABLE_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="LlamaIndex + Hyperbolic.ai Document Processor", version="1.0.0")
+app = FastAPI(title="LlamaIndex + Hyperbolic.ai + Airtable Document Processor", version="2.0.0")
 
 # CORS middleware
 app.add_middleware(
@@ -69,9 +69,10 @@ PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "course-knowledge")
 LAKERA_API_KEY = os.getenv("LAKERA_API_KEY")
 LAKERA_BASE_URL = "https://api.lakera.ai/v1"
 
-# Supabase configuration
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+# Airtable configuration
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_BASE_URL = "https://api.airtable.com/v0"
 
 # Pinecone imports
 try:
@@ -199,31 +200,41 @@ class LakeraGuard:
             # Fail open - allow output if security check fails
             return {"safe": True, "message": f"Output security check failed: {e}"}
 
-class DocumentProcessingLogger:
-    """Logs document processing activities to Supabase"""
+class AirtableDocumentLogger:
+    """Logs document processing activities to Airtable"""
     
     def __init__(self):
         self.available = False
         
-        if not SUPABASE_AVAILABLE:
-            print("WARNING: Supabase not available, processing logging disabled")
+        if not AIRTABLE_AVAILABLE:
+            print("WARNING: Requests library not available, Airtable logging disabled")
             return
             
         try:
-            if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-                print("WARNING: Supabase credentials missing, processing logging disabled")
+            if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+                print("WARNING: Airtable credentials missing, processing logging disabled")
                 return
                 
-            self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            self.api_key = AIRTABLE_API_KEY
+            self.base_id = AIRTABLE_BASE_ID
+            self.base_url = f"{AIRTABLE_BASE_URL}/{self.base_id}"
             self.available = True
-            print("SUCCESS: Supabase document processing logger initialized")
+            print("SUCCESS: Airtable document processing logger initialized")
             
         except Exception as e:
-            print(f"ERROR: Failed to initialize Supabase client: {e}")
+            print(f"ERROR: Failed to initialize Airtable client: {e}")
             self.available = False
     
-    async def log_processing_start(self, filename: str, file_size: int, user_id: str = "system") -> str:
-        """Log the start of document processing"""
+    def _get_headers(self):
+        """Get headers for Airtable API requests"""
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+    
+    async def log_processing_start(self, filename: str, file_size: int, user_id: str = "system", 
+                                 course_name: str = "", module_name: str = "") -> str:
+        """Log the start of document processing to Airtable"""
         if not self.available:
             return None
             
@@ -233,93 +244,161 @@ class DocumentProcessingLogger:
             session_id = str(uuid.uuid4())
             
             processing_data = {
-                "session_id": session_id,
-                "filename": filename,
-                "file_size_bytes": file_size,
-                "user_id": user_id,
-                "status": "processing",
-                "started_at": datetime.now().isoformat(),
-                "service": "llamaindex-processor"
+                "fields": {
+                    "Session ID": session_id,
+                    "File Name": filename,
+                    "File Size (Bytes)": file_size,
+                    "User ID": user_id,
+                    "Course Name": course_name,
+                    "Module Name": module_name,
+                    "Processing Status": "Processing",
+                    "Started At": datetime.now().isoformat(),
+                    "Service": "llamaindex-processor"
+                }
             }
             
-            result = self.supabase.table("document_processing_log").insert(processing_data).execute()
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/Documents",
+                    headers=self._get_headers(),
+                    json=processing_data,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                # Store the Airtable record ID for updates
+                record_id = result["id"]
             
-            print(f"SUCCESS: Logged processing start for {filename} (Session: {session_id})")
-            return session_id
+            print(f"SUCCESS: Logged processing start for {filename} (Session: {session_id}, Record: {record_id})")
+            return f"{session_id}|{record_id}"  # Return both session and record ID
             
         except Exception as e:
-            print(f"ERROR: Failed to log processing start: {e}")
+            print(f"ERROR: Failed to log processing start to Airtable: {e}")
             return None
     
-    async def log_processing_complete(self, session_id: str, chunks_created: int, 
+    async def log_processing_complete(self, session_record_id: str, chunks_created: int, 
                                     processing_summary: dict, classification: dict = None,
-                                    security_result: dict = None, processing_time: float = None) -> bool:
-        """Log successful completion of document processing"""
-        if not self.available or not session_id:
+                                    security_result: dict = None, processing_time: float = None,
+                                    backblaze_url: str = None) -> bool:
+        """Log successful completion of document processing to Airtable"""
+        if not self.available or not session_record_id:
             return False
             
         try:
+            # Parse session_record_id to get Airtable record ID
+            session_id, record_id = session_record_id.split("|")
+            
             update_data = {
-                "status": "completed",
-                "completed_at": datetime.now().isoformat(),
-                "chunks_created": chunks_created,
-                "processing_summary": processing_summary,
-                "classification": classification or {},
-                "security_result": security_result or {"safe": True, "message": "No security screening"}
+                "fields": {
+                    "Processing Status": "Complete",
+                    "Completed At": datetime.now().isoformat(),
+                    "Chunks Created": chunks_created,
+                    "Success Rate": "100%"
+                }
             }
             
+            # Add optional fields if provided
             if processing_time:
-                update_data["processing_time_seconds"] = processing_time
+                update_data["fields"]["Processing Time (Seconds)"] = round(processing_time, 2)
             
-            self.supabase.table("document_processing_log").update(update_data).eq("session_id", session_id).execute()
+            if classification:
+                update_data["fields"]["Industry"] = classification.get("industry", "")
+                update_data["fields"]["Content Type"] = classification.get("content_type", "")
+                update_data["fields"]["Difficulty Level"] = classification.get("difficulty_level", "")
+            
+            if security_result:
+                update_data["fields"]["Security Status"] = "Safe" if security_result.get("safe") else "Flagged"
+                if security_result.get("categories"):
+                    update_data["fields"]["Security Notes"] = str(security_result["categories"])
+            
+            if backblaze_url:
+                update_data["fields"]["Backblaze URL"] = backblaze_url
+            
+            # Add processing summary as notes
+            if processing_summary:
+                summary_text = f"LlamaIndex: {processing_summary.get('llamaindex_chunks', 0)} chunks, "
+                summary_text += f"LangExtract: {processing_summary.get('langextract_processed', 0)} enhanced, "
+                summary_text += f"Hyperbolic: {processing_summary.get('hyperbolic_enhanced', 0)} analyzed"
+                update_data["fields"]["Processing Notes"] = summary_text
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    f"{self.base_url}/Documents/{record_id}",
+                    headers=self._get_headers(),
+                    json=update_data,
+                    timeout=10.0
+                )
+                response.raise_for_status()
             
             print(f"SUCCESS: Logged processing completion for session {session_id}")
             return True
             
         except Exception as e:
-            print(f"ERROR: Failed to log processing completion: {e}")
+            print(f"ERROR: Failed to log processing completion to Airtable: {e}")
             return False
     
-    async def log_processing_error(self, session_id: str, error_message: str) -> bool:
-        """Log processing failure"""
-        if not self.available or not session_id:
+    async def log_processing_error(self, session_record_id: str, error_message: str) -> bool:
+        """Log processing failure to Airtable"""
+        if not self.available or not session_record_id:
             return False
             
         try:
+            # Parse session_record_id to get Airtable record ID
+            session_id, record_id = session_record_id.split("|")
+            
             update_data = {
-                "status": "failed",
-                "completed_at": datetime.now().isoformat(),
-                "error_message": error_message
+                "fields": {
+                    "Processing Status": "Failed",
+                    "Completed At": datetime.now().isoformat(),
+                    "Error Message": error_message,
+                    "Success Rate": "0%"
+                }
             }
             
-            self.supabase.table("document_processing_log").update(update_data).eq("session_id", session_id).execute()
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    f"{self.base_url}/Documents/{record_id}",
+                    headers=self._get_headers(),
+                    json=update_data,
+                    timeout=10.0
+                )
+                response.raise_for_status()
             
             print(f"SUCCESS: Logged processing error for session {session_id}")
             return True
             
         except Exception as e:
-            print(f"ERROR: Failed to log processing error: {e}")
+            print(f"ERROR: Failed to log processing error to Airtable: {e}")
             return False
     
     async def get_processing_stats(self) -> dict:
-        """Get processing statistics from Supabase"""
+        """Get processing statistics from Airtable"""
         if not self.available:
-            return {"error": "Supabase not available"}
+            return {"error": "Airtable not available"}
             
         try:
-            # Get recent processing stats
-            result = self.supabase.table("document_processing_log")\
-                .select("status, chunks_created, file_size_bytes, created_at")\
-                .order("created_at", desc=True)\
-                .limit(100)\
-                .execute()
+            # Get recent processing stats from Airtable
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/Documents?maxRecords=100&sort[0][field]=Started At&sort[0][direction]=desc",
+                    headers=self._get_headers(),
+                    timeout=15.0
+                )
+                response.raise_for_status()
+                result = response.json()
             
-            if not result.data:
+            if not result.get("records"):
                 return {"total_processed": 0, "success_rate": 0}
             
-            total = len(result.data)
-            successful = len([r for r in result.data if r.get("status") == "completed"])
-            total_chunks = sum(r.get("chunks_created", 0) for r in result.data if r.get("chunks_created"))
+            records = result["records"]
+            total = len(records)
+            successful = len([r for r in records if r["fields"].get("Processing Status") == "Complete"])
+            total_chunks = sum(r["fields"].get("Chunks Created", 0) for r in records)
+            
+            # Calculate file sizes
+            total_size = sum(r["fields"].get("File Size (Bytes)", 0) for r in records)
+            avg_size = total_size / total if total > 0 else 0
             
             return {
                 "total_processed": total,
@@ -327,11 +406,22 @@ class DocumentProcessingLogger:
                 "failed": total - successful,
                 "success_rate": round((successful / total * 100), 2) if total > 0 else 0,
                 "total_chunks_created": total_chunks,
-                "recent_activity": result.data[:10]
+                "total_data_processed_mb": round(total_size / (1024*1024), 2),
+                "avg_file_size_mb": round(avg_size / (1024*1024), 2),
+                "recent_activity": [
+                    {
+                        "filename": r["fields"].get("File Name", ""),
+                        "status": r["fields"].get("Processing Status", ""),
+                        "chunks": r["fields"].get("Chunks Created", 0),
+                        "processed_at": r["fields"].get("Started At", ""),
+                        "course": r["fields"].get("Course Name", "")
+                    }
+                    for r in records[:10]
+                ]
             }
             
         except Exception as e:
-            print(f"ERROR: Failed to get processing stats: {e}")
+            print(f"ERROR: Failed to get processing stats from Airtable: {e}")
             return {"error": f"Failed to get stats: {e}"}
 
 class HyperbolicLLM:
@@ -371,7 +461,7 @@ class HyperbolicLLM:
                 raise HTTPException(status_code=500, detail=f"Hyperbolic API error: {e}")
 
 class DocumentProcessor:
-    """Document processing with LlamaIndex + Hyperbolic.ai + LangExtract + Lakera Security"""
+    """Document processing with LlamaIndex + Hyperbolic.ai + LangExtract + Lakera Security + Airtable Logging"""
     
     def __init__(self):
         self.available = False
@@ -404,12 +494,12 @@ class DocumentProcessor:
         else:
             logger.warning("Lakera Guard not configured - security screening disabled")
         
-        # Initialize Supabase logger
-        self.supabase_logger = DocumentProcessingLogger()
-        if self.supabase_logger.available:
-            logger.info("Supabase document processing logging enabled")
+        # Initialize Airtable logger (REPLACED SUPABASE)
+        self.airtable_logger = AirtableDocumentLogger()
+        if self.airtable_logger.available:
+            logger.info("Airtable document processing logging enabled")
         else:
-            logger.warning("Supabase logging not available")
+            logger.warning("Airtable logging not available")
         
         # Set up OpenAI for embeddings (still need this for LlamaIndex)
         if os.getenv("OPENAI_API_KEY"):
@@ -432,22 +522,26 @@ class DocumentProcessor:
             logger.error(f"LangExtract setup failed: {e}")
             return None
     
-    async def process_document(self, file_path: str, content: bytes, filename: str, user_id: str = "system") -> dict:
-        """Process document with full pipeline: Lakera Security + LlamaIndex + LangExtract + Hyperbolic + Supabase Logging"""
+    async def process_document(self, file_path: str, content: bytes, filename: str, 
+                             user_id: str = "system", course_name: str = "", 
+                             module_name: str = "") -> dict:
+        """Process document with full pipeline: Lakera Security + LlamaIndex + LangExtract + Hyperbolic + Airtable Logging"""
         if not self.available:
             raise HTTPException(status_code=503, detail="Document processor not available")
         
         # Initialize processing session for logging
-        session_id = None
+        session_record_id = None
         processing_start_time = datetime.now()
         
         try:
-            # Step 0: Start Supabase logging
-            if self.supabase_logger.available:
-                session_id = await self.supabase_logger.log_processing_start(
+            # Step 0: Start Airtable logging (REPLACED SUPABASE)
+            if self.airtable_logger.available:
+                session_record_id = await self.airtable_logger.log_processing_start(
                     filename=filename,
                     file_size=len(content),
-                    user_id=user_id
+                    user_id=user_id,
+                    course_name=course_name,
+                    module_name=module_name
                 )
             
             # Step 1: Security screening of filename and initial content
@@ -455,9 +549,9 @@ class DocumentProcessor:
                 # Screen filename for potential security issues
                 filename_check = await self.lakera_guard.screen_input(filename, user_id)
                 if not filename_check["safe"]:
-                    if session_id:
-                        await self.supabase_logger.log_processing_error(
-                            session_id, f"Filename blocked by security: {filename_check['categories']}"
+                    if session_record_id:
+                        await self.airtable_logger.log_processing_error(
+                            session_record_id, f"Filename blocked by security: {filename_check['categories']}"
                         )
                     raise HTTPException(
                         status_code=400, 
@@ -468,9 +562,9 @@ class DocumentProcessor:
                 content_sample = content[:1000].decode('utf-8', errors='ignore')
                 content_check = await self.lakera_guard.screen_input(content_sample, user_id)
                 if not content_check["safe"]:
-                    if session_id:
-                        await self.supabase_logger.log_processing_error(
-                            session_id, f"Content blocked by security: {content_check['categories']}"
+                    if session_record_id:
+                        await self.airtable_logger.log_processing_error(
+                            session_record_id, f"Content blocked by security: {content_check['categories']}"
                         )
                     raise HTTPException(
                         status_code=400,
@@ -500,26 +594,6 @@ class DocumentProcessor:
             nodes = self.node_parser.get_nodes_from_documents(documents)
             
             # Step 4: Process each chunk with LangExtract + Hyperbolic
-            if filename.endswith('.pdf'):
-                # Save file temporarily for processing
-                with open(f"/tmp/{filename}", "wb") as f:
-                    f.write(content)
-                documents = self.pdf_reader.load_data(f"/tmp/{filename}")
-                os.remove(f"/tmp/{filename}")
-            elif filename.endswith('.docx'):
-                with open(f"/tmp/{filename}", "wb") as f:
-                    f.write(content)
-                documents = self.docx_reader.load_data(f"/tmp/{filename}")
-                os.remove(f"/tmp/{filename}")
-            else:
-                # Plain text processing
-                text = content.decode('utf-8')
-                documents = [Document(text=text)]
-            
-            # Step 2: Parse into nodes/chunks
-            nodes = self.node_parser.get_nodes_from_documents(documents)
-            
-            # Step 3: Process each chunk with LangExtract + Hyperbolic
             processed_chunks = []
             for i, node in enumerate(nodes):
                 chunk_data = {
@@ -530,7 +604,7 @@ class DocumentProcessor:
                     "chunk_index": i
                 }
                 
-                # Step 3a: LangExtract structured extraction with source grounding
+                # Step 4a: LangExtract structured extraction with source grounding
                 if self.lang_extractor:
                     try:
                         # Define extraction schema for course materials
@@ -555,7 +629,7 @@ class DocumentProcessor:
                         logger.warning(f"LangExtract processing failed for chunk {i}: {e}")
                         chunk_data["structured_extraction"] = None
                 
-                # Step 3b: Hyperbolic.ai enhancement for additional analysis
+                # Step 4b: Hyperbolic.ai enhancement for additional analysis
                 if hasattr(self, 'hyperbolic_llm'):
                     analysis_prompt = f"""
                     Analyze this educational content chunk and provide:
@@ -598,24 +672,38 @@ class DocumentProcessor:
                     logger.warning(f"Processed content flagged by Lakera Guard: {output_check['categories']}")
                     # Still allow processing but flag for review
             
-            # Step 6: Log successful completion to Supabase
+            # Step 6: Optional Backblaze storage
+            backblaze_url = None
+            if B2_AVAILABLE:
+                try:
+                    backblaze_url = await self._store_in_backblaze(content, file_path)
+                except Exception as e:
+                    logger.warning(f"Backblaze storage failed: {e}")
+            
+            # Step 7: Log successful completion to Airtable (REPLACED SUPABASE)
             processing_summary = {
                 "llamaindex_chunks": len(nodes),
                 "langextract_processed": sum(1 for c in processed_chunks if c.get("structured_extraction")),
                 "hyperbolic_enhanced": sum(1 for c in processed_chunks if c.get("ai_analysis"))
             }
             
+            # Get classification from first chunk for Airtable
+            classification = None
+            if processed_chunks and processed_chunks[0].get("ai_analysis"):
+                classification = processed_chunks[0]["ai_analysis"]
+            
             # Calculate processing time
             processing_time = (datetime.now() - processing_start_time).total_seconds()
             
-            if session_id and self.supabase_logger.available:
-                await self.supabase_logger.log_processing_complete(
-                    session_id=session_id,
+            if session_record_id and self.airtable_logger.available:
+                await self.airtable_logger.log_processing_complete(
+                    session_record_id=session_record_id,
                     chunks_created=len(processed_chunks),
                     processing_summary=processing_summary,
-                    classification=None,  # Add classification if you implement it
+                    classification=classification,
                     security_result=security_result,
-                    processing_time=processing_time
+                    processing_time=processing_time,
+                    backblaze_url=backblaze_url
                 )
             
             return {
@@ -625,15 +713,16 @@ class DocumentProcessor:
                 "chunks": processed_chunks,
                 "processing_summary": processing_summary,
                 "security": security_result,
-                "session_id": session_id,
+                "session_id": session_record_id.split("|")[0] if session_record_id else None,
                 "processing_time_seconds": processing_time,
-                "processed_at": datetime.now().isoformat()
+                "processed_at": datetime.now().isoformat(),
+                "backblaze_url": backblaze_url
             }
             
         except Exception as e:
-            # Log error to Supabase if possible
-            if session_id and self.supabase_logger.available:
-                await self.supabase_logger.log_processing_error(session_id, str(e))
+            # Log error to Airtable if possible (REPLACED SUPABASE)
+            if session_record_id and self.airtable_logger.available:
+                await self.airtable_logger.log_processing_error(session_record_id, str(e))
             
             logger.error(f"Document processing error: {e}")
             raise HTTPException(status_code=500, detail=f"Processing error: {e}")
@@ -737,12 +826,14 @@ document_processor = DocumentProcessor()
 @app.get("/")
 async def root():
     return {
-        "service": "LlamaIndex + Hyperbolic.ai Document Processor",
+        "service": "LlamaIndex + Hyperbolic.ai + Airtable Document Processor",
         "status": "running",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "hyperbolic_enabled": bool(HYPERBOLIC_API_KEY),
         "llamaindex_available": LLAMAINDEX_AVAILABLE,
-        "security_enabled": bool(LAKERA_API_KEY)
+        "langextract_available": LANGEXTRACT_AVAILABLE,
+        "security_enabled": bool(LAKERA_API_KEY),
+        "airtable_logging": bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID)
     }
 
 @app.get("/health")
@@ -757,7 +848,7 @@ async def health():
             "backblaze": B2_AVAILABLE,
             "pinecone": PINECONE_AVAILABLE,
             "lakera_guard": bool(LAKERA_API_KEY),
-            "supabase": SUPABASE_AVAILABLE and bool(SUPABASE_URL and SUPABASE_ANON_KEY),
+            "airtable": AIRTABLE_AVAILABLE and bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID),
             "document_processor": document_processor.available
         }
     }
@@ -770,7 +861,7 @@ async def process_course_material(
     industry: str = Form(default="auto-detect"),
     user_id: str = Form(default="anonymous")
 ):
-    """Process course material with enhanced classification and security screening"""
+    """Process course material with enhanced classification, security screening, and Airtable logging"""
     
     if not document_processor.available:
         raise HTTPException(status_code=503, detail="Document processor not available")
@@ -778,12 +869,14 @@ async def process_course_material(
     try:
         content = await file.read()
         
-        # Enhanced processing with course context and security
+        # Enhanced processing with course context and security + Airtable logging
         result = await document_processor.process_document(
             file_path=f"courses/{course_name}/{module_name}/{file.filename}",
             content=content,
             filename=file.filename,
-            user_id=user_id
+            user_id=user_id,
+            course_name=course_name,
+            module_name=module_name
         )
         
         # Add course-specific metadata
@@ -938,21 +1031,22 @@ async def get_knowledge_statistics():
 
 @app.get("/stats/processing")
 async def get_processing_statistics():
-    """Get document processing statistics from Supabase"""
+    """Get document processing statistics from Airtable (REPLACED SUPABASE)"""
     
-    if not document_processor.supabase_logger.available:
-        raise HTTPException(status_code=503, detail="Supabase logging not available")
+    if not document_processor.airtable_logger.available:
+        raise HTTPException(status_code=503, detail="Airtable logging not available")
     
     try:
-        stats = await document_processor.supabase_logger.get_processing_stats()
+        stats = await document_processor.airtable_logger.get_processing_stats()
         return {
             "status": "success",
             "timestamp": datetime.now().isoformat(),
-            "statistics": stats
+            "statistics": stats,
+            "data_source": "Airtable"
         }
         
     except Exception as e:
-        logger.error(f"Failed to get processing stats: {e}")
+        logger.error(f"Failed to get processing stats from Airtable: {e}")
         raise HTTPException(status_code=500, detail=f"Stats error: {e}")
 
 @app.post("/extract")
@@ -1016,7 +1110,7 @@ async def process_document(
     enhance_with_ai: bool = Form(default=True),
     extract_structured: bool = Form(default=True)
 ):
-    """Process uploaded document with LlamaIndex + optional Hyperbolic.ai enhancement + LangExtract"""
+    """Process uploaded document with LlamaIndex + optional Hyperbolic.ai enhancement + LangExtract + Airtable logging"""
     
     if not document_processor.available:
         raise HTTPException(status_code=503, detail="Document processor not available")
@@ -1024,7 +1118,7 @@ async def process_document(
     # Read file content
     content = await file.read()
     
-    # Process with our enhanced pipeline
+    # Process with our enhanced pipeline (now logs to Airtable instead of Supabase)
     result = await document_processor.process_document(
         file_path=file.filename,
         content=content,

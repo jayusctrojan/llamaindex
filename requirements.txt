@@ -25,12 +25,12 @@ pinecone
 # Backblaze B2 storage
 b2sdk
 
+# Airtable for document tracking (replaces Supabase)
+requests
+
 # OpenAI and Hyperbolic integration
 openai
 httpx
-
-# Lakera Guard for AI security
-requests
 
 # Additional utilities
 pydantic
