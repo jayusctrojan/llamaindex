@@ -121,7 +121,7 @@ class HyperbolicLLM:
                 return result["choices"][0]["message"]["content"]
             except Exception as e:
                 logger.error(f"Hyperbolic API error: {e}")
-                raise HTTPException(status_code=500, f"Hyperbolic API error: {e}")
+                raise HTTPException(status_code=500, detail=f"Hyperbolic API error: {e}")
 
 class DocumentProcessor:
     """Document processing with LlamaIndex + Hyperbolic.ai + LangExtract"""
@@ -280,6 +280,27 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"Document processing error: {e}")
             raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+    
+    async def _extract_with_langextract(self, text: str, schema: dict, filename: str, chunk_index: int) -> dict:
+        """Helper method for LangExtract processing"""
+        if not self.lang_extractor:
+            return None
+            
+        try:
+            # Use LangExtract for precise extraction
+            result = self.lang_extractor.extract(
+                text=text,
+                schema=schema,
+                source_metadata={
+                    "filename": filename,
+                    "chunk_index": chunk_index,
+                    "processed_at": datetime.now().isoformat()
+                }
+            )
+            return result
+        except Exception as e:
+            logger.error(f"LangExtract extraction failed: {e}")
+            return None
     
     async def _classify_and_tag_content(self, text: str, filename: str) -> dict:
         """Use Hyperbolic.ai to intelligently classify content and generate tags - completely dynamic"""
