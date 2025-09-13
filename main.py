@@ -1,12 +1,16 @@
 import os
 import logging
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, FileResponse
+from pydantic import BaseModel
 import uvicorn
 from typing import Optional
 import json
 import httpx
 from datetime import datetime
+import base64
 
 # LlamaIndex imports with error handling
 try:
@@ -39,6 +43,26 @@ except ImportError as e:
     print(f"⚠️  LangExtract not available: {e}")
     LANGEXTRACT_AVAILABLE = False
 
+# YouTube processing imports
+try:
+    import yt_dlp
+    from youtube_transcript_api import YouTubeTranscriptApi
+    YOUTUBE_AVAILABLE = True
+    print("✅ YouTube processing libraries available")
+except ImportError as e:
+    print(f"⚠️  YouTube processing not available: {e}")
+    YOUTUBE_AVAILABLE = False
+
+# Web scraping imports
+try:
+    from bs4 import BeautifulSoup
+    import newspaper3k
+    WEB_SCRAPING_AVAILABLE = True
+    print("✅ Web scraping libraries available") 
+except ImportError as e:
+    print(f"⚠️  Web scraping not available: {e}")
+    WEB_SCRAPING_AVAILABLE = False
+
 # Airtable imports
 try:
     import requests
@@ -52,7 +76,7 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="LlamaIndex + Hyperbolic.ai + Airtable Document Processor", version="2.1.0")
+app = FastAPI(title="AI Empire - LlamaIndex + Organizational Intelligence", version="2.1.1")
 
 # CORS middleware
 app.add_middleware(
@@ -62,6 +86,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static files (web interface)
+if os.path.exists("web-interface"):
+    app.mount("/static", StaticFiles(directory="web-interface"), name="static")
 
 # Configuration
 HYPERBOLIC_API_KEY = os.getenv("HYPERBOLIC_API_KEY")
@@ -85,6 +113,34 @@ LAKERA_BASE_URL = "https://api.lakera.ai/v1"
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_BASE_URL = "https://api.airtable.com/v0"
+
+# n8n webhook URL (configured during setup)
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "https://jb-n8n.onrender.com/webhook/content-upload")
+
+# Pydantic models for the new endpoints
+class ContentUploadRequest(BaseModel):
+    contentType: str  # 'url' or 'file'
+    url: Optional[str] = None
+    filename: Optional[str] = None
+    fileContent: Optional[str] = None  # base64 encoded
+    mimeType: Optional[str] = None
+    fileSize: Optional[int] = None
+    course: str = "General"
+    module: str = "Unknown"
+    uploadedBy: str = "html_interface"
+
+class YouTubeProcessRequest(BaseModel):
+    url: str
+    extract_images: bool = True
+    extract_transcript: bool = True
+    include_metadata: bool = True
+    output_format: str = "markdown"
+
+class ArticleProcessRequest(BaseModel):
+    url: str
+    extract_images: bool = True
+    extract_text: bool = True
+    output_format: str = "markdown"
 
 # Simplified Pinecone setup with robust error handling
 index = None
@@ -573,37 +629,353 @@ class DocumentProcessor:
             logger.error(f"Document processing error: {e}")
             raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
-# Initialize processor
-document_processor = DocumentProcessor()
+class YouTubeProcessor:
+    """Process YouTube URLs to extract transcripts and metadata"""
+    
+    def __init__(self):
+        self.available = YOUTUBE_AVAILABLE
+        
+    async def process_youtube_url(self, url: str, extract_images: bool = True, 
+                                extract_transcript: bool = True, 
+                                include_metadata: bool = True) -> dict:
+        """Process YouTube URL and return markdown content"""
+        if not self.available:
+            raise HTTPException(status_code=503, detail="YouTube processing not available")
+        
+        try:
+            # Extract video ID from URL
+            if "youtu.be/" in url:
+                video_id = url.split("youtu.be/")[1].split("?")[0]
+            elif "youtube.com/watch?v=" in url:
+                video_id = url.split("v=")[1].split("&")[0]
+            else:
+                raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+            
+            # Get video metadata
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            
+            # Extract transcript
+            transcript_text = ""
+            if extract_transcript:
+                try:
+                    transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                    transcript_text = "\n".join([t['text'] for t in transcript])
+                except Exception as e:
+                    logger.warning(f"Could not extract transcript: {e}")
+                    transcript_text = "Transcript not available"
+            
+            # Create markdown content
+            markdown_content = f"""# {info.get('title', 'YouTube Video')}
 
-@app.get("/")
-async def root():
-    return {
-        "service": "LlamaIndex + Hyperbolic.ai + Airtable Document Processor",
-        "status": "running",
-        "version": "2.1.0 (Robust Build)",
-        "architecture": "unified_pinecone_basic",
-        "pinecone_index": PINECONE_INDEX_NAME if PINECONE_AVAILABLE else "not_configured",
-        "pinecone_namespace": PINECONE_NAMESPACE if PINECONE_AVAILABLE else "not_configured",
-        "components": {
-            "llamaindex": LLAMAINDEX_AVAILABLE,
-            "pinecone": PINECONE_AVAILABLE,
-            "pinecone_vector_store": PINECONE_VECTOR_STORE_AVAILABLE,
-            "langextract": LANGEXTRACT_AVAILABLE,
-            "hyperbolic": bool(HYPERBOLIC_API_KEY),
-            "airtable": AIRTABLE_AVAILABLE and bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID),
-            "security": bool(LAKERA_API_KEY),
-            "backblaze": B2_AVAILABLE
-        },
-        "build_status": "robust_with_graceful_degradation"
-    }
+**Channel:** {info.get('uploader', 'Unknown')}
+**Duration:** {info.get('duration', 0)} seconds
+**Upload Date:** {info.get('upload_date', 'Unknown')}
+**View Count:** {info.get('view_count', 0):,}
+**URL:** {url}
+
+## Description
+{info.get('description', 'No description available')[:500]}...
+
+## Transcript
+{transcript_text}
+
+---
+*Processed by AI Empire YouTube Processor*
+"""
+            
+            return {
+                "status": "success",
+                "video_id": video_id,
+                "title": info.get('title', 'YouTube Video'),
+                "channel": info.get('uploader', 'Unknown'),
+                "duration": info.get('duration', 0),
+                "view_count": info.get('view_count', 0),
+                "markdown_content": markdown_content,
+                "transcript": transcript_text,
+                "metadata": {
+                    "source_type": "youtube_video",
+                    "processor": "youtube_workflow", 
+                    "processing_timestamp": datetime.now().isoformat()
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"YouTube processing error: {e}")
+            raise HTTPException(status_code=500, detail=f"YouTube processing error: {e}")
+
+class ArticleProcessor:
+    """Process article URLs to extract clean markdown content"""
+    
+    def __init__(self):
+        self.available = WEB_SCRAPING_AVAILABLE
+        
+    async def process_article_url(self, url: str, extract_images: bool = True, 
+                                extract_text: bool = True) -> dict:
+        """Process article URL and return markdown content"""
+        if not self.available:
+            raise HTTPException(status_code=503, detail="Article processing not available")
+        
+        try:
+            # Use newspaper3k for article extraction
+            from newspaper import Article
+            
+            article = Article(url)
+            article.download()
+            article.parse()
+            
+            # Create markdown content
+            markdown_content = f"""# {article.title or 'Article'}
+
+**Source:** {url}
+**Authors:** {', '.join(article.authors) if article.authors else 'Unknown'}
+**Publish Date:** {article.publish_date or 'Unknown'}
+
+## Summary
+{article.summary or 'No summary available'}
+
+## Content
+{article.text}
+
+---
+*Processed by AI Empire Article Processor*
+"""
+            
+            return {
+                "status": "success",
+                "title": article.title or "Article",
+                "authors": article.authors,
+                "publish_date": str(article.publish_date) if article.publish_date else None,
+                "markdown_content": markdown_content,
+                "text_content": article.text,
+                "summary": article.summary,
+                "metadata": {
+                    "source_type": "web_article",
+                    "processor": "article_workflow",
+                    "processing_timestamp": datetime.now().isoformat()
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Article processing error: {e}")
+            raise HTTPException(status_code=500, detail=f"Article processing error: {e}")
+
+# Initialize processors
+document_processor = DocumentProcessor()
+youtube_processor = YouTubeProcessor()
+article_processor = ArticleProcessor()
+
+# NEW ENDPOINTS FOR AI EMPIRE WORKFLOW
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_web_interface():
+    """Serve the main web interface"""
+    try:
+        with open("web-interface/index.html", "r", encoding="utf-8") as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content)
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Web interface not found</h1><p>Please ensure web-interface/index.html exists.</p>")
+
+@app.get("/upload", response_class=HTMLResponse)
+async def upload_interface():
+    """Alternative route for upload interface"""
+    return await serve_web_interface()
+
+@app.post("/content-upload")
+async def content_upload_endpoint(request: ContentUploadRequest):
+    """Main endpoint for content upload from HTML interface"""
+    
+    try:
+        # Generate processing ID
+        processing_id = f"ai_empire_{int(datetime.now().timestamp())}"
+        
+        # Log the upload
+        logger.info(f"Content upload received: {request.contentType} - {request.filename or request.url}")
+        
+        # For now, forward to n8n webhook if configured
+        if N8N_WEBHOOK_URL:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        N8N_WEBHOOK_URL,
+                        json=request.dict(),
+                        timeout=30.0
+                    )
+                    logger.info(f"Forwarded to n8n: {response.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to forward to n8n: {e}")
+        
+        # Return immediate response
+        return {
+            "status": "received",
+            "processing_id": processing_id,
+            "timestamp": datetime.now().isoformat(),
+            "content_type": request.contentType,
+            "filename": request.filename,
+            "url": request.url,
+            "course": request.course,
+            "module": request.module,
+            "message": "Content received and queued for processing"
+        }
+        
+    except Exception as e:
+        logger.error(f"Content upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload error: {e}")
+
+@app.post("/process-youtube")
+async def process_youtube_endpoint(request: YouTubeProcessRequest):
+    """Process YouTube URL and return transcript + metadata as markdown"""
+    
+    try:
+        result = await youtube_processor.process_youtube_url(
+            url=request.url,
+            extract_images=request.extract_images,
+            extract_transcript=request.extract_transcript,
+            include_metadata=request.include_metadata
+        )
+        
+        # If Backblaze is available, save to youtube-content folder
+        if B2_AVAILABLE and bucket:
+            try:
+                filename = f"youtube_{result['video_id']}_{int(datetime.now().timestamp())}.md"
+                
+                # Upload to youtube-content folder
+                bucket.upload_bytes(
+                    data_bytes=result['markdown_content'].encode('utf-8'),
+                    file_name=f"youtube-content/{filename}",
+                    content_type="text/markdown"
+                )
+                logger.info(f"YouTube content saved to B2: youtube-content/{filename}")
+                
+                result["backblaze_file"] = f"youtube-content/{filename}"
+            except Exception as e:
+                logger.warning(f"Failed to save YouTube content to B2: {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"YouTube processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"YouTube processing error: {e}")
+
+@app.post("/process-article") 
+async def process_article_endpoint(request: ArticleProcessRequest):
+    """Process article URL and return clean markdown content"""
+    
+    try:
+        result = await article_processor.process_article_url(
+            url=request.url,
+            extract_images=request.extract_images,
+            extract_text=request.extract_text
+        )
+        
+        # If Backblaze is available, save to youtube-content folder
+        if B2_AVAILABLE and bucket:
+            try:
+                # Create safe filename from title
+                safe_title = "".join(c for c in result['title'][:50] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                filename = f"article_{safe_title}_{int(datetime.now().timestamp())}.md"
+                
+                # Upload to youtube-content folder (reusing for articles)
+                bucket.upload_bytes(
+                    data_bytes=result['markdown_content'].encode('utf-8'),
+                    file_name=f"youtube-content/{filename}",
+                    content_type="text/markdown"
+                )
+                logger.info(f"Article content saved to B2: youtube-content/{filename}")
+                
+                result["backblaze_file"] = f"youtube-content/{filename}"
+            except Exception as e:
+                logger.warning(f"Failed to save article content to B2: {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Article processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Article processing error: {e}")
+
+@app.post("/process-content")
+async def process_content_unified(request: Request):
+    """Unified content processing endpoint for n8n workflow"""
+    
+    try:
+        # Parse JSON request
+        content_data = await request.json()
+        
+        content = content_data.get("content", "")
+        metadata = content_data.get("metadata", {})
+        processing_options = content_data.get("processing_options", {})
+        
+        # Create document from content
+        document = Document(text=content)
+        
+        # Process with LlamaIndex
+        if document_processor.available:
+            nodes = document_processor.node_parser.get_nodes_from_documents([document])
+            
+            # Generate embeddings if OpenAI key is available
+            embeddings = []
+            if os.getenv("OPENAI_API_KEY"):
+                try:
+                    from openai import OpenAI
+                    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                    
+                    for node in nodes:
+                        embedding_response = client.embeddings.create(
+                            model="text-embedding-3-small",
+                            input=node.text
+                        )
+                        embeddings.append(embedding_response.data[0].embedding)
+                except Exception as e:
+                    logger.warning(f"Failed to generate embeddings: {e}")
+            
+            # Prepare response
+            chunks = []
+            for i, node in enumerate(nodes):
+                chunk_data = {
+                    "text": node.text,
+                    "metadata": {
+                        **node.metadata,
+                        **metadata,
+                        "chunk_index": i,
+                        "total_chunks": len(nodes)
+                    }
+                }
+                chunks.append(chunk_data)
+            
+            return {
+                "status": "success",
+                "original_content": content,
+                "chunks": chunks,
+                "embeddings": embeddings,
+                "summary": content[:500] + "..." if len(content) > 500 else content,
+                "keywords": [],  # Could add keyword extraction
+                "entities": [],  # Could add entity extraction
+                "topics": [],
+                "questions": [],
+                "processing_time_ms": 0
+            }
+        else:
+            raise HTTPException(status_code=503, detail="Document processor not available")
+            
+    except Exception as e:
+        logger.error(f"Unified content processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+# EXISTING ENDPOINTS (kept for backward compatibility)
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "architecture": "unified_pinecone_basic",
+        "version": "2.1.1",
+        "architecture": "ai_empire_unified",
         "components": {
             "llamaindex": LLAMAINDEX_AVAILABLE,
             "pinecone": PINECONE_AVAILABLE,
@@ -613,6 +985,8 @@ async def health():
             "backblaze": B2_AVAILABLE,
             "lakera_guard": bool(LAKERA_API_KEY),
             "airtable": AIRTABLE_AVAILABLE and bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID),
+            "youtube_processing": YOUTUBE_AVAILABLE,
+            "web_scraping": WEB_SCRAPING_AVAILABLE,
             "document_processor": document_processor.available
         },
         "pinecone_config": {
@@ -746,7 +1120,7 @@ async def get_knowledge_statistics():
         
         return {
             "status": "success",
-            "architecture": "unified_pinecone_basic_v2.1",
+            "architecture": "ai_empire_unified_v2.1",
             "pinecone_stats": {
                 "index_name": PINECONE_INDEX_NAME,
                 "namespace": PINECONE_NAMESPACE,
@@ -780,7 +1154,7 @@ async def get_processing_statistics():
             "timestamp": datetime.now().isoformat(),
             "statistics": stats,
             "data_source": "Airtable",
-            "architecture": "unified_pinecone_basic_v2.1"
+            "architecture": "ai_empire_unified_v2.1"
         }
         
     except Exception as e:
