@@ -15,6 +15,7 @@ try:
     from llama_index.readers.file import PDFReader, DocxReader
     from llama_index.llms.openai import OpenAI
     from llama_index.embeddings.openai import OpenAIEmbedding
+    from llama_index.vector_stores.pinecone import PineconeVectorStore
     LLAMAINDEX_AVAILABLE = True
 except ImportError as e:
     print(f"LlamaIndex not available: {e}")
@@ -41,7 +42,7 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="LlamaIndex + Hyperbolic.ai + Airtable Document Processor", version="2.0.0")
+app = FastAPI(title="LlamaIndex + Hyperbolic.ai + Airtable Document Processor", version="2.1.0")
 
 # CORS middleware
 app.add_middleware(
@@ -61,9 +62,10 @@ B2_KEY_ID = os.getenv("B2_KEY_ID")
 B2_APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY")  
 B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME")
 
-# Pinecone configuration
+# 🚀 UNIFIED PINECONE CONFIGURATION
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "course-knowledge")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "ai-empire-organizational-intelligence")
+PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "organizational_intelligence")
 
 # Lakera Guard configuration
 LAKERA_API_KEY = os.getenv("LAKERA_API_KEY")
@@ -74,19 +76,31 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_BASE_URL = "https://api.airtable.com/v0"
 
-# Pinecone imports
+# Unified Pinecone setup
 try:
     from pinecone import Pinecone
     PINECONE_AVAILABLE = bool(PINECONE_API_KEY)
     if PINECONE_AVAILABLE:
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
+        
+        # Configure LlamaIndex to use unified vector store
+        vector_store = PineconeVectorStore(
+            pinecone_index=index,
+            namespace=PINECONE_NAMESPACE,
+            add_sparse_vector=False
+        )
+        print(f"✅ Connected to unified Pinecone index: {PINECONE_INDEX_NAME}")
+        print(f"✅ Using namespace: {PINECONE_NAMESPACE}")
     else:
         index = None
+        vector_store = None
+        print("❌ Pinecone not configured")
 except ImportError as e:
     print(f"Pinecone not available: {e}")
     PINECONE_AVAILABLE = False
     index = None
+    vector_store = None
 
 # Backblaze B2 imports
 try:
@@ -253,7 +267,9 @@ class AirtableDocumentLogger:
                     "Module Name": module_name,
                     "Processing Status": "Processing",
                     "Started At": datetime.now().isoformat(),
-                    "Service": "llamaindex-processor"
+                    "Service": "llamaindex-unified-processor",
+                    "Pinecone Index": PINECONE_INDEX_NAME,
+                    "Pinecone Namespace": PINECONE_NAMESPACE
                 }
             }
             
@@ -294,7 +310,8 @@ class AirtableDocumentLogger:
                     "Processing Status": "Complete",
                     "Completed At": datetime.now().isoformat(),
                     "Chunks Created": chunks_created,
-                    "Success Rate": "100%"
+                    "Success Rate": "100%",
+                    "Pipeline Version": "ai_empire_v2.1_unified"
                 }
             }
             
@@ -408,6 +425,8 @@ class AirtableDocumentLogger:
                 "total_chunks_created": total_chunks,
                 "total_data_processed_mb": round(total_size / (1024*1024), 2),
                 "avg_file_size_mb": round(avg_size / (1024*1024), 2),
+                "pinecone_index": PINECONE_INDEX_NAME,
+                "pinecone_namespace": PINECONE_NAMESPACE,
                 "recent_activity": [
                     {
                         "filename": r["fields"].get("File Name", ""),
@@ -494,19 +513,19 @@ class DocumentProcessor:
         else:
             logger.warning("Lakera Guard not configured - security screening disabled")
         
-        # Initialize Airtable logger (REPLACED SUPABASE)
+        # Initialize Airtable logger
         self.airtable_logger = AirtableDocumentLogger()
         if self.airtable_logger.available:
             logger.info("Airtable document processing logging enabled")
         else:
             logger.warning("Airtable logging not available")
         
-        # Set up OpenAI for embeddings (still need this for LlamaIndex)
+        # Set up OpenAI for embeddings
         if os.getenv("OPENAI_API_KEY"):
             Settings.embed_model = OpenAIEmbedding()
         
         self.available = True
-        logger.info("Document processor initialized successfully")
+        logger.info("Document processor initialized successfully with unified Pinecone architecture")
     
     def _setup_langextract(self):
         """Configure LangExtract to use Hyperbolic.ai as the LLM backend"""
@@ -521,11 +540,68 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"LangExtract setup failed: {e}")
             return None
+
+    def _create_unified_metadata(self, filename: str, chunk_index: int, total_chunks: int, 
+                               course_name: str = "", module_name: str = "", 
+                               classification: dict = None) -> dict:
+        """Create metadata following unified schema for CrewAI agent filtering"""
+        
+        metadata = {
+            # System identification
+            "source_system": "ai_empire_pipeline",
+            "processor": "llamaindex",
+            
+            # Document identification  
+            "document_id": f"{filename}_{chunk_index}_{total_chunks}",
+            "filename": filename,
+            "chunk_index": chunk_index,
+            "total_chunks": total_chunks,
+            
+            # Business context (for agent filtering)
+            "course": course_name,
+            "module": module_name,
+            "department": "general",  # Default, can be enhanced
+            
+            # Analysis results (defaults)
+            "analysis_type": "comprehensive",
+            "strategic_value": "moderate",
+            "executive_approved": False,
+            
+            # Content characteristics
+            "content_type": "markdown",
+            "has_visual_content": False,
+            "visual_elements": [],
+            
+            # Processing metadata
+            "processing_timestamp": datetime.now().isoformat(),
+            "pipeline_version": "ai_empire_v2.1_unified",
+            "embedding_model": "text-embedding-3-small"
+        }
+        
+        # Enhance with classification if available
+        if classification:
+            metadata.update({
+                "industry": classification.get("industry", "general"),
+                "difficulty_level": classification.get("difficulty_level", "intermediate"),
+                "content_type": classification.get("content_type", "theory"),
+                "department": classification.get("primary_department", "general"),
+                "tags": classification.get("tags", []),
+                "business_value": classification.get("business_value", ""),
+                "target_audience": classification.get("target_audience", "")
+            })
+            
+            # Set strategic value based on classification
+            if "strategic" in classification.get("keywords", []):
+                metadata["strategic_value"] = "urgent"
+            elif "executive" in classification.get("keywords", []):
+                metadata["executive_approved"] = True
+                
+        return metadata
     
     async def process_document(self, file_path: str, content: bytes, filename: str, 
                              user_id: str = "system", course_name: str = "", 
                              module_name: str = "") -> dict:
-        """Process document with full pipeline: Lakera Security + LlamaIndex + LangExtract + Hyperbolic + Airtable Logging"""
+        """Process document with full pipeline: Lakera Security + LlamaIndex + LangExtract + Hyperbolic + Airtable Logging + Unified Pinecone"""
         if not self.available:
             raise HTTPException(status_code=503, detail="Document processor not available")
         
@@ -534,7 +610,7 @@ class DocumentProcessor:
         processing_start_time = datetime.now()
         
         try:
-            # Step 0: Start Airtable logging (REPLACED SUPABASE)
+            # Step 0: Start Airtable logging
             if self.airtable_logger.available:
                 session_record_id = await self.airtable_logger.log_processing_start(
                     filename=filename,
@@ -593,8 +669,10 @@ class DocumentProcessor:
             # Step 3: Parse into nodes/chunks
             nodes = self.node_parser.get_nodes_from_documents(documents)
             
-            # Step 4: Process each chunk with LangExtract + Hyperbolic
+            # Step 4: Create VectorStoreIndex using unified Pinecone
             processed_chunks = []
+            pinecone_vectors = []
+            
             for i, node in enumerate(nodes):
                 chunk_data = {
                     "text": node.text,
@@ -630,37 +708,64 @@ class DocumentProcessor:
                         chunk_data["structured_extraction"] = None
                 
                 # Step 4b: Hyperbolic.ai enhancement for additional analysis
+                classification = None
                 if hasattr(self, 'hyperbolic_llm'):
                     analysis_prompt = f"""
-                    Analyze this educational content chunk and provide:
-                    1. Content difficulty level (beginner/intermediate/advanced)
-                    2. Subject classification (business/technical/creative/etc)
-                    3. Key relationships to other topics
-                    4. Suggested prerequisite knowledge
+                    Analyze this educational content chunk and provide classification for AI agent filtering:
                     
                     Chunk: {node.text[:500]}...
+                    Filename: {filename}
+                    Course: {course_name}
                     
                     Respond with JSON format:
                     {{
+                        "industry": "specific_industry_category",
                         "difficulty_level": "beginner|intermediate|advanced",
-                        "subject_classification": "primary_subject",
-                        "related_topics": ["topic1", "topic2"],
-                        "prerequisites": ["prereq1", "prereq2"],
-                        "content_type": "theory|practical|example|exercise"
+                        "content_type": "theory|practical|case-study|framework",
+                        "primary_department": "operations|finance|hr|it|marketing|general",
+                        "tags": ["relevant", "searchable", "keywords"],
+                        "business_value": "specific value this provides",
+                        "target_audience": "who should learn this",
+                        "keywords": ["strategic", "executive", "technical", "operational"]
                     }}
                     """
                     
                     try:
                         analysis = await self.hyperbolic_llm.complete(analysis_prompt)
-                        enhanced_metadata = json.loads(analysis)
-                        chunk_data["ai_analysis"] = enhanced_metadata
+                        classification = json.loads(analysis)
+                        chunk_data["ai_analysis"] = classification
                     except Exception as e:
                         logger.warning(f"Hyperbolic analysis failed for chunk {i}: {e}")
                         chunk_data["ai_analysis"] = None
+                        classification = None
+                
+                # Step 4c: Create unified metadata for Pinecone
+                unified_metadata = self._create_unified_metadata(
+                    filename=filename,
+                    chunk_index=i,
+                    total_chunks=len(nodes),
+                    course_name=course_name,
+                    module_name=module_name,
+                    classification=classification
+                )
+                
+                # Update node metadata with unified schema
+                node.metadata.update(unified_metadata)
+                chunk_data["unified_metadata"] = unified_metadata
                 
                 processed_chunks.append(chunk_data)
             
-            # Step 5: Security screening of final output
+            # Step 5: Store in unified Pinecone index using LlamaIndex
+            if vector_store and PINECONE_AVAILABLE:
+                try:
+                    # Create index from nodes with unified metadata
+                    index_from_nodes = VectorStoreIndex(nodes, vector_store=vector_store)
+                    logger.info(f"✅ Stored {len(nodes)} chunks in unified Pinecone index: {PINECONE_INDEX_NAME}")
+                    logger.info(f"✅ Used namespace: {PINECONE_NAMESPACE}")
+                except Exception as e:
+                    logger.error(f"Failed to store in Pinecone: {e}")
+            
+            # Step 6: Security screening of final output
             security_result = {"safe": True, "message": "No security screening"}
             if self.lakera_guard and self.lakera_guard.available:
                 # Screen the processed content for potential issues
@@ -672,7 +777,7 @@ class DocumentProcessor:
                     logger.warning(f"Processed content flagged by Lakera Guard: {output_check['categories']}")
                     # Still allow processing but flag for review
             
-            # Step 6: Optional Backblaze storage
+            # Step 7: Optional Backblaze storage
             backblaze_url = None
             if B2_AVAILABLE:
                 try:
@@ -680,11 +785,12 @@ class DocumentProcessor:
                 except Exception as e:
                     logger.warning(f"Backblaze storage failed: {e}")
             
-            # Step 7: Log successful completion to Airtable (REPLACED SUPABASE)
+            # Step 8: Log successful completion to Airtable
             processing_summary = {
                 "llamaindex_chunks": len(nodes),
                 "langextract_processed": sum(1 for c in processed_chunks if c.get("structured_extraction")),
-                "hyperbolic_enhanced": sum(1 for c in processed_chunks if c.get("ai_analysis"))
+                "hyperbolic_enhanced": sum(1 for c in processed_chunks if c.get("ai_analysis")),
+                "pinecone_stored": len(nodes) if vector_store else 0
             }
             
             # Get classification from first chunk for Airtable
@@ -716,11 +822,14 @@ class DocumentProcessor:
                 "session_id": session_record_id.split("|")[0] if session_record_id else None,
                 "processing_time_seconds": processing_time,
                 "processed_at": datetime.now().isoformat(),
-                "backblaze_url": backblaze_url
+                "backblaze_url": backblaze_url,
+                "pinecone_index": PINECONE_INDEX_NAME,
+                "pinecone_namespace": PINECONE_NAMESPACE,
+                "pipeline_version": "ai_empire_v2.1_unified"
             }
             
         except Exception as e:
-            # Log error to Airtable if possible (REPLACED SUPABASE)
+            # Log error to Airtable if possible
             if session_record_id and self.airtable_logger.available:
                 await self.airtable_logger.log_processing_error(session_record_id, str(e))
             
@@ -747,56 +856,6 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"LangExtract extraction failed: {e}")
             return None
-    
-    async def _classify_and_tag_content(self, text: str, filename: str) -> dict:
-        """Use Hyperbolic.ai to intelligently classify content and generate tags - completely dynamic"""
-        if not hasattr(self, 'hyperbolic_llm'):
-            return {"industry": "general", "tags": [], "department_relevance": []}
-            
-        classification_prompt = f"""
-        Analyze this course content and classify it for business AI departments.
-        Be completely dynamic - don't limit yourself to predefined categories.
-        
-        Filename: {filename}
-        Content: {text[:1000]}...
-        
-        Provide classification in this exact JSON format:
-        {{
-            "industry": "the actual industry this content belongs to (be specific and accurate)",
-            "sub_categories": ["specific sub-areas within this industry"],
-            "difficulty_level": "beginner|intermediate|advanced|expert",
-            "content_type": "theory|practical|case-study|framework|tool|template|certification|interview-prep",
-            "department_relevance": [
-                {{"department": "most_relevant_dept", "relevance_score": 0.9, "specific_use": "how this dept would use this"}},
-                {{"department": "secondary_dept", "relevance_score": 0.7, "specific_use": "secondary application"}}
-            ],
-            "tags": ["dynamic tags based on actual content"],
-            "business_value": "specific value this knowledge provides",
-            "key_frameworks": ["any named methodologies, frameworks, or systems mentioned"],
-            "target_audience": "who specifically should learn this",
-            "prerequisites": ["what knowledge is assumed"],
-            "learning_outcomes": ["what students will be able to do after learning this"],
-            "industry_keywords": ["domain-specific terms and jargon used"],
-            "skill_level_indicators": ["what suggests the difficulty level"],
-            "practical_applications": ["real-world use cases mentioned"]
-        }}
-        
-        Important: Base your classification entirely on the actual content. Don't use predefined lists.
-        """
-        
-        try:
-            classification_result = await self.hyperbolic_llm.complete(classification_prompt)
-            return json.loads(classification_result)
-        except Exception as e:
-            logger.warning(f"Classification failed: {e}")
-            # Fallback with basic analysis
-            return {
-                "industry": "unknown", 
-                "tags": [filename.replace('.pdf', '').replace('.docx', '').replace('_', ' ').replace('-', ' ')],
-                "department_relevance": [],
-                "sub_categories": [],
-                "content_type": "unknown"
-            }
 
     async def _store_in_backblaze(self, content: bytes, file_path: str) -> str:
         """Store processed content in Backblaze B2"""
@@ -828,12 +887,22 @@ async def root():
     return {
         "service": "LlamaIndex + Hyperbolic.ai + Airtable Document Processor",
         "status": "running",
-        "version": "2.0.0",
+        "version": "2.1.0",
+        "architecture": "unified_pinecone",
+        "pinecone_index": PINECONE_INDEX_NAME,
+        "pinecone_namespace": PINECONE_NAMESPACE,
         "hyperbolic_enabled": bool(HYPERBOLIC_API_KEY),
         "llamaindex_available": LLAMAINDEX_AVAILABLE,
         "langextract_available": LANGEXTRACT_AVAILABLE,
         "security_enabled": bool(LAKERA_API_KEY),
-        "airtable_logging": bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID)
+        "airtable_logging": bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID),
+        "unified_features": [
+            "✅ Single Pinecone index for all content",
+            "✅ Enhanced metadata schema for agent filtering", 
+            "✅ Cross-departmental insights capability",
+            "✅ Executive-level content tagging",
+            "✅ CrewAI agent compatibility"
+        ]
     }
 
 @app.get("/health")
@@ -841,6 +910,7 @@ async def health():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
+        "architecture": "unified_pinecone_v2.1",
         "components": {
             "llamaindex": LLAMAINDEX_AVAILABLE,
             "langextract": LANGEXTRACT_AVAILABLE,
@@ -849,7 +919,13 @@ async def health():
             "pinecone": PINECONE_AVAILABLE,
             "lakera_guard": bool(LAKERA_API_KEY),
             "airtable": AIRTABLE_AVAILABLE and bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID),
-            "document_processor": document_processor.available
+            "document_processor": document_processor.available,
+            "unified_vector_store": vector_store is not None
+        },
+        "pinecone_config": {
+            "index": PINECONE_INDEX_NAME,
+            "namespace": PINECONE_NAMESPACE,
+            "connected": PINECONE_AVAILABLE
         }
     }
 
@@ -861,7 +937,7 @@ async def process_course_material(
     industry: str = Form(default="auto-detect"),
     user_id: str = Form(default="anonymous")
 ):
-    """Process course material with enhanced classification, security screening, and Airtable logging"""
+    """Process course material with enhanced classification, security screening, and unified Pinecone storage"""
     
     if not document_processor.available:
         raise HTTPException(status_code=503, detail="Document processor not available")
@@ -869,7 +945,7 @@ async def process_course_material(
     try:
         content = await file.read()
         
-        # Enhanced processing with course context and security + Airtable logging
+        # Enhanced processing with course context and security + Airtable logging + Unified Pinecone
         result = await document_processor.process_document(
             file_path=f"courses/{course_name}/{module_name}/{file.filename}",
             content=content,
@@ -895,45 +971,6 @@ async def process_course_material(
         logger.error(f"Course processing error: {e}")
         raise HTTPException(status_code=500, detail=f"Course processing error: {e}")
 
-@app.get("/courses")
-async def list_courses():
-    """List all courses stored in Backblaze"""
-    if not B2_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Backblaze not configured")
-    
-    try:
-        # List files in courses/ folder
-        files_info = []
-        for file_version, folder_path in bucket.ls(folder_to_list="courses/", recursive=True):
-            if file_version:
-                files_info.append({
-                    "filename": file_version.file_name,
-                    "size": file_version.size,
-                    "upload_timestamp": file_version.upload_timestamp,
-                    "download_url": b2_api.get_download_url_for_file_name(B2_BUCKET_NAME, file_version.file_name)
-                })
-        
-        # Group by course
-        courses = {}
-        for file_info in files_info:
-            path_parts = file_info["filename"].split('/')
-            if len(path_parts) >= 3:  # courses/course-name/file
-                course_name = path_parts[1]
-                if course_name not in courses:
-                    courses[course_name] = []
-                courses[course_name].append(file_info)
-        
-        return {
-            "status": "success",
-            "total_courses": len(courses),
-            "courses": courses,
-            "total_files": len(files_info)
-        }
-        
-    except Exception as e:
-        logger.error(f"Course listing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Course listing error: {e}")
-
 @app.post("/search-knowledge")
 async def search_course_knowledge(
     query: str = Form(...),
@@ -942,30 +979,38 @@ async def search_course_knowledge(
     difficulty_filter: str = Form(default=""),
     limit: int = Form(default=10)
 ):
-    """Search your course knowledge base with dynamic filtering"""
+    """Search your course knowledge base using unified Pinecone index with dynamic filtering"""
     
     if not PINECONE_AVAILABLE:
         raise HTTPException(status_code=503, detail="Pinecone not configured")
     
     try:
-        # Generate embedding for the query (placeholder for now)
-        query_embedding = [0.0] * 1536  # Replace with actual embedding generation
+        # Generate embedding for the query using OpenAI (same as used for storage)
+        from openai import OpenAI
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         
-        # Build dynamic filter based on classification
+        embedding_response = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=query
+        )
+        query_embedding = embedding_response.data[0].embedding
+        
+        # Build dynamic filter based on unified metadata schema
         filter_conditions = {}
         
         if industry_filter:
             filter_conditions["industry"] = industry_filter
         if department_filter:
-            filter_conditions["department_tags"] = {"$in": [department_filter]}
+            filter_conditions["department"] = department_filter
         if difficulty_filter:
             filter_conditions["difficulty_level"] = difficulty_filter
         
-        # Search Pinecone
+        # Search unified Pinecone index
         search_results = index.query(
             vector=query_embedding,
             filter=filter_conditions if filter_conditions else None,
             top_k=limit,
+            namespace=PINECONE_NAMESPACE,
             include_metadata=True
         )
         
@@ -976,19 +1021,22 @@ async def search_course_knowledge(
                 "score": match.score,
                 "text": match.metadata.get("text", ""),
                 "source": {
-                    "file": match.metadata.get("source_file", ""),
+                    "file": match.metadata.get("filename", ""),
                     "chunk_index": match.metadata.get("chunk_index", 0),
-                    "backblaze_url": match.metadata.get("backblaze_url", ""),
-                    "course_name": match.metadata.get("course_name", "")
+                    "document_id": match.metadata.get("document_id", ""),
+                    "course_name": match.metadata.get("course", ""),
+                    "module_name": match.metadata.get("module", "")
                 },
                 "classification": {
                     "industry": match.metadata.get("industry", ""),
-                    "department_tags": match.metadata.get("department_tags", []),
+                    "department": match.metadata.get("department", ""),
                     "difficulty_level": match.metadata.get("difficulty_level", ""),
-                    "content_type": match.metadata.get("content_type", "")
+                    "content_type": match.metadata.get("content_type", ""),
+                    "strategic_value": match.metadata.get("strategic_value", ""),
+                    "executive_approved": match.metadata.get("executive_approved", False)
                 },
-                "tags": match.metadata.get("search_tags", []),
-                "key_concepts": match.metadata.get("key_concepts", [])
+                "tags": match.metadata.get("tags", []),
+                "business_value": match.metadata.get("business_value", "")
             }
             formatted_results.append(result)
         
@@ -997,7 +1045,10 @@ async def search_course_knowledge(
             "query": query,
             "filters_applied": filter_conditions,
             "total_results": len(formatted_results),
-            "results": formatted_results
+            "results": formatted_results,
+            "pinecone_index": PINECONE_INDEX_NAME,
+            "pinecone_namespace": PINECONE_NAMESPACE,
+            "architecture": "unified_v2.1"
         }
         
     except Exception as e:
@@ -1006,7 +1057,7 @@ async def search_course_knowledge(
 
 @app.get("/knowledge-stats")
 async def get_knowledge_statistics():
-    """Get statistics about your course knowledge base"""
+    """Get statistics about your unified knowledge base"""
     
     if not PINECONE_AVAILABLE:
         raise HTTPException(status_code=503, detail="Pinecone not configured")
@@ -1015,14 +1066,27 @@ async def get_knowledge_statistics():
         # Get index stats
         stats = index.describe_index_stats()
         
+        # Get namespace-specific stats
+        namespace_stats = stats.namespaces.get(PINECONE_NAMESPACE, {})
+        
         return {
             "status": "success",
+            "architecture": "unified_pinecone_v2.1",
             "pinecone_stats": {
-                "total_vectors": stats.total_vector_count,
+                "index_name": PINECONE_INDEX_NAME,
+                "namespace": PINECONE_NAMESPACE,
+                "total_vectors_in_index": stats.total_vector_count,
+                "vectors_in_namespace": namespace_stats.get('vector_count', 0),
                 "dimension": stats.dimension,
                 "index_fullness": stats.index_fullness
             },
-            "dynamic_classification": "Industries, departments, and tags discovered from your actual course content"
+            "benefits": [
+                "✅ Single source of truth for all AI agents",
+                "✅ Enhanced metadata for smart agent filtering", 
+                "✅ Cross-departmental insight capability",
+                "✅ Executive-level content prioritization",
+                "✅ Consistent intelligence across all agents"
+            ]
         }
         
     except Exception as e:
@@ -1031,7 +1095,7 @@ async def get_knowledge_statistics():
 
 @app.get("/stats/processing")
 async def get_processing_statistics():
-    """Get document processing statistics from Airtable (REPLACED SUPABASE)"""
+    """Get document processing statistics from Airtable"""
     
     if not document_processor.airtable_logger.available:
         raise HTTPException(status_code=503, detail="Airtable logging not available")
@@ -1042,7 +1106,8 @@ async def get_processing_statistics():
             "status": "success",
             "timestamp": datetime.now().isoformat(),
             "statistics": stats,
-            "data_source": "Airtable"
+            "data_source": "Airtable",
+            "architecture": "unified_pinecone_v2.1"
         }
         
     except Exception as e:
@@ -1097,7 +1162,8 @@ async def extract_structured_data(
             "schema_used": extraction_schema,
             "extracted_data": extracted_result,
             "source_grounding": "Exact character positions and quotes preserved by LangExtract",
-            "processed_at": datetime.now().isoformat()
+            "processed_at": datetime.now().isoformat(),
+            "architecture": "unified_pinecone_v2.1"
         }
         
     except Exception as e:
@@ -1110,7 +1176,7 @@ async def process_document(
     enhance_with_ai: bool = Form(default=True),
     extract_structured: bool = Form(default=True)
 ):
-    """Process uploaded document with LlamaIndex + optional Hyperbolic.ai enhancement + LangExtract + Airtable logging"""
+    """Process uploaded document with LlamaIndex + optional Hyperbolic.ai enhancement + LangExtract + Airtable logging + Unified Pinecone"""
     
     if not document_processor.available:
         raise HTTPException(status_code=503, detail="Document processor not available")
@@ -1118,7 +1184,7 @@ async def process_document(
     # Read file content
     content = await file.read()
     
-    # Process with our enhanced pipeline (now logs to Airtable instead of Supabase)
+    # Process with our enhanced unified pipeline
     result = await document_processor.process_document(
         file_path=file.filename,
         content=content,
@@ -1170,7 +1236,8 @@ async def transcribe_audio(
                 "filename": file.filename,
                 "transcription": transcription_result.get("text", ""),
                 "language": transcription_result.get("language"),
-                "processed_at": datetime.now().isoformat()
+                "processed_at": datetime.now().isoformat(),
+                "architecture": "unified_pinecone_v2.1"
             }
             
     except Exception as e:
