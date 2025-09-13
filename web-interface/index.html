@@ -26,7 +26,7 @@
             backdrop-filter: blur(10px);
             border-radius: 20px;
             padding: 40px;
-            max-width: 600px;
+            max-width: 700px;
             width: 100%;
             box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
         }
@@ -58,6 +58,7 @@
             cursor: pointer;
             font-weight: 600;
             transition: all 0.3s ease;
+            font-size: 14px;
         }
         
         .tab-button.active {
@@ -137,6 +138,30 @@
         .upload-subtext {
             color: #666;
             font-size: 14px;
+            margin-bottom: 15px;
+        }
+        
+        .upload-options {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 15px;
+        }
+        
+        .upload-option-btn {
+            padding: 8px 16px;
+            background: #f8f9fa;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+        
+        .upload-option-btn:hover {
+            background: #e9ecef;
+            border-color: #1e90ff;
         }
         
         .file-info {
@@ -146,10 +171,40 @@
             border-radius: 8px;
             padding: 15px;
             margin-top: 15px;
+            max-height: 200px;
+            overflow-y: auto;
         }
         
         .file-info.show {
             display: block;
+        }
+        
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #d1ecf1;
+        }
+        
+        .file-item:last-child {
+            border-bottom: none;
+        }
+        
+        .file-details {
+            flex: 1;
+        }
+        
+        .file-remove {
+            color: #dc3545;
+            cursor: pointer;
+            font-weight: bold;
+            padding: 4px 8px;
+        }
+        
+        .file-remove:hover {
+            background: #f8d7da;
+            border-radius: 4px;
         }
         
         .submit-button {
@@ -213,6 +268,16 @@
             border: 1px solid #f5c6cb;
             color: #721c24;
         }
+        
+        .batch-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 15px;
+            font-size: 14px;
+            color: #856404;
+        }
     </style>
 </head>
 <body>
@@ -223,7 +288,8 @@
         
         <div class="upload-tabs">
             <button class="tab-button active" onclick="switchTab('url')">URL/Link</button>
-            <button class="tab-button" onclick="switchTab('file')">File Upload</button>
+            <button class="tab-button" onclick="switchTab('files')">Files</button>
+            <button class="tab-button" onclick="switchTab('folder')">Folder</button>
         </div>
         
         <!-- URL Upload Tab -->
@@ -248,34 +314,79 @@
             </form>
         </div>
         
-        <!-- File Upload Tab -->
-        <div id="file-tab" class="tab-content">
-            <form id="file-form">
+        <!-- Multiple Files Upload Tab -->
+        <div id="files-tab" class="tab-content">
+            <form id="files-form">
                 <div class="form-group">
-                    <div class="file-upload-area" id="file-drop-area">
+                    <div class="file-upload-area" id="files-drop-area">
                         <div class="upload-icon">📁</div>
-                        <div class="upload-text">Drag & Drop your file here</div>
+                        <div class="upload-text">Drag & Drop multiple files here</div>
                         <div class="upload-subtext">or click to browse (PDF, Word, Excel, PowerPoint, Images, Audio, Video)</div>
-                        <input type="file" id="file-input" accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.jpg,.jpeg,.png,.gif,.mp3,.wav,.mp4,.avi,.mov,.txt,.md" style="display: none;">
+                        <div class="upload-options">
+                            <div class="upload-option-btn" onclick="document.getElementById('files-input').click()">
+                                Browse Files
+                            </div>
+                        </div>
+                        <input type="file" id="files-input" accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.jpg,.jpeg,.png,.gif,.mp3,.wav,.mp4,.avi,.mov,.txt,.md" multiple style="display: none;">
                     </div>
                     
-                    <div class="file-info" id="file-info">
-                        <strong>Selected File:</strong>
-                        <div id="file-details"></div>
+                    <div class="file-info" id="files-info">
+                        <strong>Selected Files (<span id="file-count">0</span>):</strong>
+                        <div id="files-list"></div>
                     </div>
                 </div>
                 
                 <div class="form-group">
-                    <label for="file-course">Course</label>
-                    <input type="text" id="file-course" name="course" placeholder="e.g., Leadership Training" value="General">
+                    <label for="files-course">Course</label>
+                    <input type="text" id="files-course" name="course" placeholder="e.g., Leadership Training" value="General">
                 </div>
                 
                 <div class="form-group">
-                    <label for="file-module">Module</label>
-                    <input type="text" id="file-module" name="module" placeholder="e.g., Strategic Planning" value="Direct Upload">
+                    <label for="files-module">Module</label>
+                    <input type="text" id="files-module" name="module" placeholder="e.g., Strategic Planning" value="Multiple Files">
                 </div>
                 
-                <button type="submit" class="submit-button" disabled>Upload & Process</button>
+                <button type="submit" class="submit-button" disabled>Upload & Process Files</button>
+            </form>
+        </div>
+        
+        <!-- Folder Upload Tab -->
+        <div id="folder-tab" class="tab-content">
+            <form id="folder-form">
+                <div class="form-group">
+                    <div class="file-upload-area" onclick="document.getElementById('folder-input').click()">
+                        <div class="upload-icon">📂</div>
+                        <div class="upload-text">Select an entire folder</div>
+                        <div class="upload-subtext">Click to browse and select a complete course folder</div>
+                        <div class="upload-options">
+                            <div class="upload-option-btn">
+                                Browse Folder
+                            </div>
+                        </div>
+                        <input type="file" id="folder-input" webkitdirectory directory style="display: none;">
+                    </div>
+                    
+                    <div class="file-info" id="folder-info">
+                        <strong>Folder Contents (<span id="folder-file-count">0</span> files):</strong>
+                        <div id="folder-files-list"></div>
+                    </div>
+                </div>
+                
+                <div class="batch-info">
+                    <strong>Batch Processing:</strong> All files will be processed with the same course and module information.
+                </div>
+                
+                <div class="form-group">
+                    <label for="folder-course">Course Name</label>
+                    <input type="text" id="folder-course" name="course" placeholder="e.g., Advanced Leadership Program" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="folder-module">Module Name</label>
+                    <input type="text" id="folder-module" name="module" placeholder="e.g., Week 1 - Strategy Fundamentals" required>
+                </div>
+                
+                <button type="submit" class="submit-button" disabled>Process Entire Folder</button>
             </form>
         </div>
         
@@ -287,7 +398,8 @@
     </div>
 
     <script>
-        let selectedFile = null;
+        let selectedFiles = [];
+        let folderFiles = [];
         
         // Tab switching
         function switchTab(tab) {
@@ -298,48 +410,125 @@
             document.getElementById(`${tab}-tab`).classList.add('active');
         }
         
-        // File upload handling
-        const fileDropArea = document.getElementById('file-drop-area');
-        const fileInput = document.getElementById('file-input');
-        const fileInfo = document.getElementById('file-info');
-        const fileDetails = document.getElementById('file-details');
-        const fileSubmitButton = document.querySelector('#file-form .submit-button');
+        // Multiple files handling
+        const filesDropArea = document.getElementById('files-drop-area');
+        const filesInput = document.getElementById('files-input');
+        const filesInfo = document.getElementById('files-info');
+        const filesList = document.getElementById('files-list');
+        const fileCount = document.getElementById('file-count');
+        const filesSubmitButton = document.querySelector('#files-form .submit-button');
         
-        fileDropArea.addEventListener('click', () => fileInput.click());
-        
-        fileDropArea.addEventListener('dragover', (e) => {
+        filesDropArea.addEventListener('dragover', (e) => {
             e.preventDefault();
-            fileDropArea.classList.add('dragover');
+            filesDropArea.classList.add('dragover');
         });
         
-        fileDropArea.addEventListener('dragleave', () => {
-            fileDropArea.classList.remove('dragover');
+        filesDropArea.addEventListener('dragleave', () => {
+            filesDropArea.classList.remove('dragover');
         });
         
-        fileDropArea.addEventListener('drop', (e) => {
+        filesDropArea.addEventListener('drop', (e) => {
             e.preventDefault();
-            fileDropArea.classList.remove('dragover');
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                handleFileSelection(files[0]);
-            }
+            filesDropArea.classList.remove('dragover');
+            const files = Array.from(e.dataTransfer.files);
+            handleMultipleFiles(files);
         });
         
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                handleFileSelection(e.target.files[0]);
-            }
+        filesInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            handleMultipleFiles(files);
         });
         
-        function handleFileSelection(file) {
-            selectedFile = file;
-            fileDetails.innerHTML = `
-                <div><strong>Name:</strong> ${file.name}</div>
-                <div><strong>Size:</strong> ${formatFileSize(file.size)}</div>
-                <div><strong>Type:</strong> ${file.type || 'Unknown'}</div>
-            `;
-            fileInfo.classList.add('show');
-            fileSubmitButton.disabled = false;
+        // Folder handling
+        const folderInput = document.getElementById('folder-input');
+        const folderInfo = document.getElementById('folder-info');
+        const folderFilesList = document.getElementById('folder-files-list');
+        const folderFileCount = document.getElementById('folder-file-count');
+        const folderSubmitButton = document.querySelector('#folder-form .submit-button');
+        
+        folderInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            handleFolderFiles(files);
+        });
+        
+        function handleMultipleFiles(files) {
+            selectedFiles = files;
+            updateFilesDisplay();
+        }
+        
+        function handleFolderFiles(files) {
+            folderFiles = files;
+            updateFolderDisplay();
+        }
+        
+        function updateFilesDisplay() {
+            if (selectedFiles.length === 0) {
+                filesInfo.classList.remove('show');
+                filesSubmitButton.disabled = true;
+                return;
+            }
+            
+            fileCount.textContent = selectedFiles.length;
+            filesList.innerHTML = '';
+            
+            selectedFiles.forEach((file, index) => {
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                fileItem.innerHTML = `
+                    <div class="file-details">
+                        <strong>${file.name}</strong><br>
+                        <small>${formatFileSize(file.size)} • ${file.type || 'Unknown type'}</small>
+                    </div>
+                    <div class="file-remove" onclick="removeFile(${index})">×</div>
+                `;
+                filesList.appendChild(fileItem);
+            });
+            
+            filesInfo.classList.add('show');
+            filesSubmitButton.disabled = false;
+        }
+        
+        function updateFolderDisplay() {
+            if (folderFiles.length === 0) {
+                folderInfo.classList.remove('show');
+                folderSubmitButton.disabled = true;
+                return;
+            }
+            
+            folderFileCount.textContent = folderFiles.length;
+            folderFilesList.innerHTML = '';
+            
+            // Group files by directory
+            const filesByDir = {};
+            folderFiles.forEach(file => {
+                const pathParts = file.webkitRelativePath.split('/');
+                const dir = pathParts.slice(0, -1).join('/') || 'Root';
+                if (!filesByDir[dir]) filesByDir[dir] = [];
+                filesByDir[dir].push(file);
+            });
+            
+            Object.keys(filesByDir).forEach(dir => {
+                const dirItem = document.createElement('div');
+                dirItem.innerHTML = `<strong>📁 ${dir} (${filesByDir[dir].length} files)</strong>`;
+                folderFilesList.appendChild(dirItem);
+                
+                filesByDir[dir].forEach(file => {
+                    const fileItem = document.createElement('div');
+                    fileItem.style.marginLeft = '20px';
+                    fileItem.innerHTML = `
+                        <small>📄 ${file.name} (${formatFileSize(file.size)})</small>
+                    `;
+                    folderFilesList.appendChild(fileItem);
+                });
+            });
+            
+            folderInfo.classList.add('show');
+            folderSubmitButton.disabled = false;
+        }
+        
+        function removeFile(index) {
+            selectedFiles.splice(index, 1);
+            updateFilesDisplay();
         }
         
         function formatFileSize(bytes) {
@@ -360,23 +549,116 @@
             await submitData(data);
         });
         
-        document.getElementById('file-form').addEventListener('submit', async (e) => {
+        document.getElementById('files-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            if (!selectedFile) return;
+            if (selectedFiles.length === 0) return;
             
             const formData = new FormData(e.target);
-            const data = Object.fromEntries(formData);
+            const course = formData.get('course');
+            const module = formData.get('module');
             
-            // Convert file to base64
-            const base64 = await fileToBase64(selectedFile);
-            data.fileContent = base64;
-            data.filename = selectedFile.name;
-            data.mimeType = selectedFile.type;
-            data.fileSize = selectedFile.size;
-            data.contentType = 'file';
-            
-            await submitData(data);
+            // Process files in batches to avoid overwhelming the system
+            await processBatchFiles(selectedFiles, course, module, 'Multiple Files Upload');
         });
+        
+        document.getElementById('folder-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (folderFiles.length === 0) return;
+            
+            const formData = new FormData(e.target);
+            const course = formData.get('course');
+            const module = formData.get('module');
+            
+            await processBatchFiles(folderFiles, course, module, 'Folder Upload');
+        });
+        
+        async function processBatchFiles(files, course, module, uploadType) {
+            const progressBar = document.getElementById('progress-bar');
+            const progressFill = document.getElementById('progress-fill');
+            const statusMessage = document.getElementById('status-message');
+            const submitButtons = document.querySelectorAll('.submit-button');
+            
+            // Show progress bar and disable buttons
+            progressBar.style.display = 'block';
+            submitButtons.forEach(btn => btn.disabled = true);
+            statusMessage.style.display = 'none';
+            
+            let successCount = 0;
+            let failedCount = 0;
+            const totalFiles = files.length;
+            
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const progress = ((i + 1) / totalFiles) * 100;
+                progressFill.style.width = progress + '%';
+                
+                try {
+                    // Convert file to base64
+                    const base64 = await fileToBase64(file);
+                    const data = {
+                        contentType: 'file',
+                        fileContent: base64,
+                        filename: file.name,
+                        mimeType: file.type,
+                        fileSize: file.size,
+                        course: course,
+                        module: module,
+                        uploadedBy: 'html_interface_batch',
+                        batchInfo: {
+                            uploadType: uploadType,
+                            fileIndex: i + 1,
+                            totalFiles: totalFiles,
+                            relativePath: file.webkitRelativePath || file.name
+                        }
+                    };
+                    
+                    const response = await fetch('/content-upload', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(data)
+                    });
+                    
+                    if (response.ok) {
+                        successCount++;
+                    } else {
+                        failedCount++;
+                        console.error(`Failed to upload ${file.name}:`, response.statusText);
+                    }
+                    
+                } catch (error) {
+                    failedCount++;
+                    console.error(`Error processing ${file.name}:`, error);
+                }
+                
+                // Small delay to prevent overwhelming the server
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            
+            // Show final results
+            progressFill.style.width = '100%';
+            
+            const message = `✅ Batch upload complete! ${successCount} files uploaded successfully. ${failedCount > 0 ? `${failedCount} files failed.` : ''}`;
+            showStatus(failedCount === 0 ? 'success' : 'error', message);
+            
+            // Reset forms and re-enable buttons
+            setTimeout(() => {
+                submitButtons.forEach(btn => btn.disabled = false);
+                progressBar.style.display = 'none';
+                progressFill.style.width = '0%';
+                
+                // Clear file selections
+                selectedFiles = [];
+                folderFiles = [];
+                updateFilesDisplay();
+                updateFolderDisplay();
+                
+                // Reset form inputs
+                document.getElementById('files-form').reset();
+                document.getElementById('folder-form').reset();
+            }, 3000);
+        }
         
         function fileToBase64(file) {
             return new Promise((resolve, reject) => {
@@ -424,9 +706,6 @@
                     
                     // Reset forms
                     document.getElementById('url-form').reset();
-                    document.getElementById('file-form').reset();
-                    selectedFile = null;
-                    fileInfo.classList.remove('show');
                 } else {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
