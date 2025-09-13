@@ -122,6 +122,11 @@
             border-color: #0066cc;
         }
         
+        .file-upload-area.error {
+            border-color: #dc3545;
+            background: #fff5f5;
+        }
+        
         .file-upload-area i {
             font-size: 48px;
             color: #1e90ff;
@@ -139,6 +144,13 @@
             color: #666;
             font-size: 14px;
             margin-bottom: 15px;
+        }
+        
+        .supported-formats {
+            font-size: 12px;
+            color: #888;
+            margin-top: 10px;
+            line-height: 1.4;
         }
         
         .upload-options {
@@ -191,8 +203,21 @@
             border-bottom: none;
         }
         
+        .file-item.error {
+            background: #f8d7da;
+            border-radius: 4px;
+            padding: 8px;
+            margin: 4px 0;
+        }
+        
         .file-details {
             flex: 1;
+        }
+        
+        .file-error {
+            color: #721c24;
+            font-size: 12px;
+            font-weight: 500;
         }
         
         .file-remove {
@@ -296,8 +321,8 @@
         <div id="url-tab" class="tab-content active">
             <form id="url-form">
                 <div class="form-group">
-                    <label for="url">YouTube URL or Article Link</label>
-                    <input type="url" id="url" name="url" placeholder="https://youtube.com/watch?v=... or https://article-url.com" required>
+                    <label for="url">YouTube URL, Article Link, or Google Docs/Sheets</label>
+                    <input type="url" id="url" name="url" placeholder="https://youtube.com/watch?v=... or https://docs.google.com/..." required>
                 </div>
                 
                 <div class="form-group">
@@ -321,13 +346,17 @@
                     <div class="file-upload-area" id="files-drop-area">
                         <div class="upload-icon">📁</div>
                         <div class="upload-text">Drag & Drop multiple files here</div>
-                        <div class="upload-subtext">or click to browse (PDF, Word, Excel, PowerPoint, Images, Audio, Video)</div>
+                        <div class="upload-subtext">or click to browse supported file types</div>
+                        <div class="supported-formats">
+                            <strong>Supported:</strong> PDF, Word (docx/doc), PowerPoint (pptx/ppt), Excel (xlsx/xls), 
+                            Images (jpg/png/gif), Audio (mp3/wav), Video (mp4/avi/mov), Text (txt/md)
+                        </div>
                         <div class="upload-options">
                             <div class="upload-option-btn" onclick="document.getElementById('files-input').click()">
                                 Browse Files
                             </div>
                         </div>
-                        <input type="file" id="files-input" accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.jpg,.jpeg,.png,.gif,.mp3,.wav,.mp4,.avi,.mov,.txt,.md" multiple style="display: none;">
+                        <input type="file" id="files-input" multiple style="display: none;">
                     </div>
                     
                     <div class="file-info" id="files-info">
@@ -358,6 +387,9 @@
                         <div class="upload-icon">📂</div>
                         <div class="upload-text">Select an entire folder</div>
                         <div class="upload-subtext">Click to browse and select a complete course folder</div>
+                        <div class="supported-formats">
+                            Files will be validated individually - unsupported files will be skipped
+                        </div>
                         <div class="upload-options">
                             <div class="upload-option-btn">
                                 Browse Folder
@@ -373,7 +405,7 @@
                 </div>
                 
                 <div class="batch-info">
-                    <strong>Batch Processing:</strong> All files will be processed with the same course and module information.
+                    <strong>Batch Processing:</strong> All supported files will be processed with the same course and module information.
                 </div>
                 
                 <div class="form-group">
@@ -386,7 +418,7 @@
                     <input type="text" id="folder-module" name="module" placeholder="e.g., Week 1 - Strategy Fundamentals" required>
                 </div>
                 
-                <button type="submit" class="submit-button" disabled>Process Entire Folder</button>
+                <button type="submit" class="submit-button" disabled>Process Supported Files</button>
             </form>
         </div>
         
@@ -400,6 +432,48 @@
     <script>
         let selectedFiles = [];
         let folderFiles = [];
+        
+        // Supported file types mapping
+        const SUPPORTED_TYPES = {
+            // Documents
+            'pdf': 'Document',
+            'docx': 'Document', 'doc': 'Document',
+            'pptx': 'Presentation', 'ppt': 'Presentation',
+            'xlsx': 'Spreadsheet', 'xls': 'Spreadsheet',
+            
+            // Text files
+            'txt': 'Text', 'md': 'Markdown',
+            'rtf': 'Rich Text',
+            
+            // Images
+            'jpg': 'Image', 'jpeg': 'Image', 'png': 'Image',
+            'gif': 'Image', 'bmp': 'Image', 'tiff': 'Image',
+            'webp': 'Image', 'svg': 'Image',
+            
+            // Audio
+            'mp3': 'Audio', 'wav': 'Audio', 'flac': 'Audio',
+            'aac': 'Audio', 'ogg': 'Audio', 'm4a': 'Audio',
+            
+            // Video
+            'mp4': 'Video', 'avi': 'Video', 'mov': 'Video',
+            'mkv': 'Video', 'wmv': 'Video', 'flv': 'Video',
+            'webm': 'Video', 'mpg': 'Video', 'mpeg': 'Video',
+            
+            // Code files
+            'py': 'Code', 'js': 'Code', 'html': 'Code',
+            'css': 'Code', 'json': 'Code', 'xml': 'Code',
+            'csv': 'Data'
+        };
+        
+        function validateFileType(fileName) {
+            const extension = fileName.split('.').pop().toLowerCase();
+            return SUPPORTED_TYPES[extension] || null;
+        }
+        
+        function getUnsupportedFileError(fileName) {
+            const extension = fileName.split('.').pop().toLowerCase();
+            return `Unsupported file type: .${extension} - Please use supported formats: PDF, Word, Excel, PowerPoint, Images, Audio, Video, or Text files.`;
+        }
         
         // Tab switching
         function switchTab(tab) {
@@ -452,12 +526,20 @@
         });
         
         function handleMultipleFiles(files) {
-            selectedFiles = files;
+            selectedFiles = files.map(file => ({
+                file: file,
+                supported: validateFileType(file.name),
+                error: validateFileType(file.name) ? null : getUnsupportedFileError(file.name)
+            }));
             updateFilesDisplay();
         }
         
         function handleFolderFiles(files) {
-            folderFiles = files;
+            folderFiles = files.map(file => ({
+                file: file,
+                supported: validateFileType(file.name),
+                error: validateFileType(file.name) ? null : getUnsupportedFileError(file.name)
+            }));
             updateFolderDisplay();
         }
         
@@ -465,27 +547,52 @@
             if (selectedFiles.length === 0) {
                 filesInfo.classList.remove('show');
                 filesSubmitButton.disabled = true;
+                filesDropArea.classList.remove('error');
                 return;
             }
+            
+            const supportedFiles = selectedFiles.filter(f => f.supported);
+            const hasUnsupported = selectedFiles.some(f => !f.supported);
             
             fileCount.textContent = selectedFiles.length;
             filesList.innerHTML = '';
             
-            selectedFiles.forEach((file, index) => {
+            if (hasUnsupported) {
+                filesDropArea.classList.add('error');
+            } else {
+                filesDropArea.classList.remove('error');
+            }
+            
+            selectedFiles.forEach((fileObj, index) => {
                 const fileItem = document.createElement('div');
-                fileItem.className = 'file-item';
-                fileItem.innerHTML = `
-                    <div class="file-details">
-                        <strong>${file.name}</strong><br>
-                        <small>${formatFileSize(file.size)} • ${file.type || 'Unknown type'}</small>
-                    </div>
-                    <div class="file-remove" onclick="removeFile(${index})">×</div>
-                `;
+                fileItem.className = fileObj.supported ? 'file-item' : 'file-item error';
+                
+                if (fileObj.supported) {
+                    fileItem.innerHTML = `
+                        <div class="file-details">
+                            <strong>${fileObj.file.name}</strong><br>
+                            <small>${formatFileSize(fileObj.file.size)} • ${fileObj.supported} • ${fileObj.file.type || 'Unknown type'}</small>
+                        </div>
+                        <div class="file-remove" onclick="removeFile(${index})">×</div>
+                    `;
+                } else {
+                    fileItem.innerHTML = `
+                        <div class="file-details">
+                            <strong>${fileObj.file.name}</strong><br>
+                            <div class="file-error">${fileObj.error}</div>
+                        </div>
+                        <div class="file-remove" onclick="removeFile(${index})">×</div>
+                    `;
+                }
                 filesList.appendChild(fileItem);
             });
             
             filesInfo.classList.add('show');
-            filesSubmitButton.disabled = false;
+            filesSubmitButton.disabled = supportedFiles.length === 0;
+            
+            if (supportedFiles.length > 0) {
+                filesSubmitButton.textContent = `Upload ${supportedFiles.length} Supported Files`;
+            }
         }
         
         function updateFolderDisplay() {
@@ -495,35 +602,55 @@
                 return;
             }
             
-            folderFileCount.textContent = folderFiles.length;
+            const supportedFiles = folderFiles.filter(f => f.supported);
+            const unsupportedCount = folderFiles.length - supportedFiles.length;
+            
+            folderFileCount.textContent = `${folderFiles.length} total, ${supportedFiles.length} supported`;
             folderFilesList.innerHTML = '';
             
             // Group files by directory
             const filesByDir = {};
-            folderFiles.forEach(file => {
-                const pathParts = file.webkitRelativePath.split('/');
+            folderFiles.forEach(fileObj => {
+                const pathParts = fileObj.file.webkitRelativePath.split('/');
                 const dir = pathParts.slice(0, -1).join('/') || 'Root';
                 if (!filesByDir[dir]) filesByDir[dir] = [];
-                filesByDir[dir].push(file);
+                filesByDir[dir].push(fileObj);
             });
             
             Object.keys(filesByDir).forEach(dir => {
+                const supportedInDir = filesByDir[dir].filter(f => f.supported).length;
+                const totalInDir = filesByDir[dir].length;
+                
                 const dirItem = document.createElement('div');
-                dirItem.innerHTML = `<strong>📁 ${dir} (${filesByDir[dir].length} files)</strong>`;
+                dirItem.innerHTML = `<strong>📁 ${dir} (${supportedInDir}/${totalInDir} supported)</strong>`;
                 folderFilesList.appendChild(dirItem);
                 
-                filesByDir[dir].forEach(file => {
+                filesByDir[dir].forEach(fileObj => {
                     const fileItem = document.createElement('div');
                     fileItem.style.marginLeft = '20px';
-                    fileItem.innerHTML = `
-                        <small>📄 ${file.name} (${formatFileSize(file.size)})</small>
-                    `;
+                    
+                    if (fileObj.supported) {
+                        fileItem.innerHTML = `
+                            <small>📄 ${fileObj.file.name} (${formatFileSize(fileObj.file.size)}) - ${fileObj.supported}</small>
+                        `;
+                    } else {
+                        fileItem.innerHTML = `
+                            <small style="color: #dc3545;">❌ ${fileObj.file.name} - Unsupported format</small>
+                        `;
+                    }
                     folderFilesList.appendChild(fileItem);
                 });
             });
             
             folderInfo.classList.add('show');
-            folderSubmitButton.disabled = false;
+            folderSubmitButton.disabled = supportedFiles.length === 0;
+            
+            if (supportedFiles.length > 0) {
+                folderSubmitButton.textContent = `Process ${supportedFiles.length} Supported Files`;
+                if (unsupportedCount > 0) {
+                    folderSubmitButton.textContent += ` (${unsupportedCount} files will be skipped)`;
+                }
+            }
         }
         
         function removeFile(index) {
@@ -551,25 +678,28 @@
         
         document.getElementById('files-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            if (selectedFiles.length === 0) return;
+            
+            const supportedFiles = selectedFiles.filter(f => f.supported).map(f => f.file);
+            if (supportedFiles.length === 0) return;
             
             const formData = new FormData(e.target);
             const course = formData.get('course');
             const module = formData.get('module');
             
-            // Process files in batches to avoid overwhelming the system
-            await processBatchFiles(selectedFiles, course, module, 'Multiple Files Upload');
+            await processBatchFiles(supportedFiles, course, module, 'Multiple Files Upload');
         });
         
         document.getElementById('folder-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            if (folderFiles.length === 0) return;
+            
+            const supportedFiles = folderFiles.filter(f => f.supported).map(f => f.file);
+            if (supportedFiles.length === 0) return;
             
             const formData = new FormData(e.target);
             const course = formData.get('course');
             const module = formData.get('module');
             
-            await processBatchFiles(folderFiles, course, module, 'Folder Upload');
+            await processBatchFiles(supportedFiles, course, module, 'Folder Upload');
         });
         
         async function processBatchFiles(files, course, module, uploadType) {
@@ -644,7 +774,10 @@
             
             // Reset forms and re-enable buttons
             setTimeout(() => {
-                submitButtons.forEach(btn => btn.disabled = false);
+                submitButtons.forEach(btn => {
+                    btn.disabled = false;
+                    btn.textContent = btn.textContent.includes('Upload') ? 'Upload & Process Files' : 'Process Entire Folder';
+                });
                 progressBar.style.display = 'none';
                 progressFill.style.width = '0%';
                 
