@@ -33,6 +33,11 @@ requests
 yt-dlp
 youtube-transcript-api
 
+# Vision processing for frame extraction and analysis
+opencv-python
+pillow
+numpy
+
 # Web scraping for article processing  
 beautifulsoup4
 newspaper3k
