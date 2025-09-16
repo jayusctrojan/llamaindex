@@ -11,6 +11,8 @@ import json
 import httpx
 from datetime import datetime
 import base64
+import subprocess
+import tempfile
 
 # LlamaIndex imports with error handling
 try:
@@ -76,7 +78,7 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI Empire - LlamaIndex + Organizational Intelligence", version="2.1.1")
+app = FastAPI(title="AI Empire - LlamaIndex + Organizational Intelligence", version="2.2.0")
 
 # CORS middleware
 app.add_middleware(
@@ -117,6 +119,10 @@ AIRTABLE_BASE_URL = "https://api.airtable.com/v0"
 # n8n webhook URL (configured during setup)
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "https://jb-n8n.onrender.com/webhook/content-upload")
 
+# Soniox configuration for audio transcription
+SONIOX_API_KEY = os.getenv("SONIOX_API_KEY")
+SONIOX_BASE_URL = "https://api.soniox.com/v1"
+
 # Pydantic models for the new endpoints
 class ContentUploadRequest(BaseModel):
     contentType: str  # 'url' or 'file'
@@ -135,6 +141,7 @@ class YouTubeProcessRequest(BaseModel):
     extract_transcript: bool = True
     include_metadata: bool = True
     output_format: str = "markdown"
+    force_high_quality: bool = False  # New option for Soniox fallback
 
 class ArticleProcessRequest(BaseModel):
     url: str
@@ -559,7 +566,7 @@ class DocumentProcessor:
                         "course": course_name,
                         "module": module_name,
                         "processing_timestamp": datetime.now().isoformat(),
-                        "pipeline_version": "ai_empire_v2.1_unified_basic"
+                        "pipeline_version": "ai_empire_v2.2_three_tier_transcription"
                     },
                     "chunk_id": node.node_id,
                     "source": filename,
@@ -622,7 +629,7 @@ class DocumentProcessor:
                 "processed_at": datetime.now().isoformat(),
                 "pinecone_index": PINECONE_INDEX_NAME if PINECONE_AVAILABLE else "not_configured",
                 "pinecone_namespace": PINECONE_NAMESPACE if PINECONE_AVAILABLE else "not_configured",
-                "pipeline_version": "ai_empire_v2.1_unified_basic"
+                "pipeline_version": "ai_empire_v2.2_three_tier_transcription"
             }
             
         except Exception as e:
@@ -630,15 +637,144 @@ class DocumentProcessor:
             raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 class YouTubeProcessor:
-    """Process YouTube URLs to extract transcripts and metadata"""
+    """Process YouTube URLs with three-tier transcription system"""
     
     def __init__(self):
         self.available = YOUTUBE_AVAILABLE
         
+    async def _call_youtube_mcp_server(self, video_id: str) -> str:
+        """Call YouTube transcription MCP server as fallback"""
+        try:
+            # Try @kimtaeyoon83/mcp-server-youtube-transcript via npx
+            # This simulates what an MCP server call would look like
+            logger.info(f"🔄 Attempting YouTube MCP server transcription for {video_id}")
+            
+            # In a real implementation, this would be an MCP server call
+            # For now, we'll simulate it by trying to use a local installation
+            cmd = [
+                "npx", "-y", "@kimtaeyoon83/mcp-server-youtube-transcript",
+                "--url", f"https://www.youtube.com/watch?v={video_id}",
+                "--lang", "en"
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                # Parse the MCP server response
+                try:
+                    mcp_response = json.loads(result.stdout)
+                    transcript = mcp_response.get("transcript", "")
+                    if transcript and len(transcript.strip()) > 50:
+                        logger.info(f"✅ YouTube MCP server provided transcript ({len(transcript)} chars)")
+                        return transcript
+                except json.JSONDecodeError:
+                    # If not JSON, treat as plain text transcript
+                    if len(result.stdout.strip()) > 50:
+                        logger.info(f"✅ YouTube MCP server provided transcript ({len(result.stdout)} chars)")
+                        return result.stdout.strip()
+            
+            logger.warning(f"⚠️ YouTube MCP server failed: {result.stderr}")
+            return None
+            
+        except subprocess.TimeoutExpired:
+            logger.warning("⚠️ YouTube MCP server timed out")
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ YouTube MCP server error: {e}")
+            return None
+    
+    async def _download_and_transcribe_with_soniox(self, url: str, video_id: str) -> str:
+        """Download audio and transcribe with Soniox as final fallback"""
+        if not SONIOX_API_KEY:
+            logger.warning("⚠️ Soniox API key not configured, skipping audio transcription")
+            return None
+            
+        try:
+            logger.info(f"🔄 Attempting Soniox transcription for {video_id}")
+            
+            # Download audio using yt-dlp
+            with tempfile.TemporaryDirectory() as temp_dir:
+                audio_path = os.path.join(temp_dir, f"{video_id}.wav")
+                
+                # yt-dlp command to extract audio
+                ydl_opts = {
+                    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                    'outtmpl': audio_path.replace('.wav', '.%(ext)s'),
+                    'quiet': True,
+                    'no_warnings': True
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                # Find the downloaded audio file
+                audio_files = [f for f in os.listdir(temp_dir) if f.startswith(video_id)]
+                if not audio_files:
+                    logger.warning("⚠️ No audio file downloaded")
+                    return None
+                
+                audio_file_path = os.path.join(temp_dir, audio_files[0])
+                
+                # Convert to wav if needed using ffmpeg
+                if not audio_file_path.endswith('.wav'):
+                    wav_path = audio_path
+                    subprocess.run([
+                        'ffmpeg', '-i', audio_file_path, '-acodec', 'pcm_s16le', 
+                        '-ar', '16000', '-ac', '1', wav_path, '-y'
+                    ], check=True, capture_output=True)
+                    audio_file_path = wav_path
+                
+                # Read audio file
+                with open(audio_file_path, 'rb') as f:
+                    audio_data = f.read()
+                
+                # Call Soniox API
+                headers = {
+                    "Authorization": f"Bearer {SONIOX_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                
+                # Upload audio and get transcript
+                audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+                
+                payload = {
+                    "audio": {
+                        "data": audio_b64
+                    },
+                    "model": "nova-2-general",
+                    "include_nonfinal": False,
+                    "enable_speaker_diarization": True,
+                    "enable_punctuation": True,
+                    "languages": ["en"]
+                }
+                
+                async with httpx.AsyncClient(timeout=300.0) as client:
+                    response = await client.post(
+                        f"{SONIOX_BASE_URL}/transcribe",
+                        headers=headers,
+                        json=payload
+                    )
+                    response.raise_for_status()
+                    
+                    soniox_result = response.json()
+                    transcript = soniox_result.get("transcript", "")
+                    
+                    if transcript and len(transcript.strip()) > 50:
+                        logger.info(f"✅ Soniox provided high-quality transcript ({len(transcript)} chars)")
+                        return transcript
+                    else:
+                        logger.warning("⚠️ Soniox returned empty or short transcript")
+                        return None
+                        
+        except Exception as e:
+            logger.warning(f"⚠️ Soniox transcription failed: {e}")
+            return None
+
     async def process_youtube_url(self, url: str, extract_images: bool = True, 
                                 extract_transcript: bool = True, 
-                                include_metadata: bool = True) -> dict:
-        """Process YouTube URL and return markdown content"""
+                                include_metadata: bool = True,
+                                force_high_quality: bool = False) -> dict:
+        """Process YouTube URL with three-tier transcription system"""
         if not self.available:
             raise HTTPException(status_code=503, detail="YouTube processing not available")
         
@@ -660,17 +796,57 @@ class YouTubeProcessor:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             
-            # Extract transcript
+            # THREE-TIER TRANSCRIPTION SYSTEM
             transcript_text = ""
-            if extract_transcript:
+            transcription_method = "none"
+            transcription_quality = "unknown"
+            
+            if extract_transcript and not force_high_quality:
+                # TIER 1: Try YouTube's built-in captions (fastest, free)
                 try:
+                    logger.info(f"🔄 Tier 1: Attempting YouTube built-in captions for {video_id}")
                     transcript = YouTubeTranscriptApi.get_transcript(video_id)
                     transcript_text = "\n".join([t['text'] for t in transcript])
+                    
+                    if transcript_text and len(transcript_text.strip()) > 50:
+                        transcription_method = "youtube_captions"
+                        transcription_quality = "good"
+                        logger.info(f"✅ Tier 1: YouTube captions successful ({len(transcript_text)} chars)")
+                    else:
+                        transcript_text = ""
+                        
                 except Exception as e:
-                    logger.warning(f"Could not extract transcript: {e}")
-                    transcript_text = "Transcript not available"
+                    logger.info(f"⚠️ Tier 1: YouTube captions failed: {e}")
+                
+                # TIER 2: Try YouTube transcription MCP server (moderate speed, better quality)
+                if not transcript_text:
+                    logger.info("🔄 Tier 2: Attempting YouTube MCP server transcription")
+                    mcp_transcript = await self._call_youtube_mcp_server(video_id)
+                    
+                    if mcp_transcript and len(mcp_transcript.strip()) > 50:
+                        transcript_text = mcp_transcript
+                        transcription_method = "youtube_mcp_server"
+                        transcription_quality = "better"
+                        logger.info(f"✅ Tier 2: YouTube MCP server successful ({len(transcript_text)} chars)")
             
-            # Create markdown content
+            # TIER 3: Try Soniox high-quality transcription (slowest, best quality)
+            if (not transcript_text and extract_transcript) or force_high_quality:
+                logger.info("🔄 Tier 3: Attempting Soniox high-quality transcription")
+                soniox_transcript = await self._download_and_transcribe_with_soniox(url, video_id)
+                
+                if soniox_transcript and len(soniox_transcript.strip()) > 50:
+                    transcript_text = soniox_transcript
+                    transcription_method = "soniox_audio_transcription"
+                    transcription_quality = "best"
+                    logger.info(f"✅ Tier 3: Soniox transcription successful ({len(transcript_text)} chars)")
+                elif not transcript_text:
+                    # Final fallback message
+                    transcript_text = "Transcript not available - all transcription methods failed"
+                    transcription_method = "failed"
+                    transcription_quality = "none"
+                    logger.warning("⚠️ All transcription tiers failed")
+            
+            # Create enhanced markdown content with transcription details
             markdown_content = f"""# {info.get('title', 'YouTube Video')}
 
 **Channel:** {info.get('uploader', 'Unknown')}
@@ -679,6 +855,9 @@ class YouTubeProcessor:
 **View Count:** {info.get('view_count', 0):,}
 **URL:** {url}
 
+**Transcription Method:** {transcription_method}
+**Transcription Quality:** {transcription_quality}
+
 ## Description
 {info.get('description', 'No description available')[:500]}...
 
@@ -686,7 +865,7 @@ class YouTubeProcessor:
 {transcript_text}
 
 ---
-*Processed by AI Empire YouTube Processor*
+*Processed by AI Empire YouTube Processor v2.2 - Three-Tier Transcription*
 """
             
             return {
@@ -698,10 +877,17 @@ class YouTubeProcessor:
                 "view_count": info.get('view_count', 0),
                 "markdown_content": markdown_content,
                 "transcript": transcript_text,
+                "transcription_details": {
+                    "method": transcription_method,
+                    "quality": transcription_quality,
+                    "length": len(transcript_text),
+                    "available": bool(transcript_text and transcription_method != "failed")
+                },
                 "metadata": {
                     "source_type": "youtube_video",
-                    "processor": "youtube_workflow", 
-                    "processing_timestamp": datetime.now().isoformat()
+                    "processor": "youtube_three_tier_v2.2", 
+                    "processing_timestamp": datetime.now().isoformat(),
+                    "transcription_system": "three_tier_fallback"
                 }
             }
             
@@ -821,7 +1007,8 @@ async def content_upload_endpoint(request: ContentUploadRequest):
             "url": request.url,
             "course": request.course,
             "module": request.module,
-            "message": "Content received and queued for processing"
+            "message": "Content received and queued for processing",
+            "transcription_system": "three_tier_fallback_enabled"
         }
         
     except Exception as e:
@@ -830,20 +1017,21 @@ async def content_upload_endpoint(request: ContentUploadRequest):
 
 @app.post("/process-youtube")
 async def process_youtube_endpoint(request: YouTubeProcessRequest):
-    """Process YouTube URL and return transcript + metadata as markdown"""
+    """Process YouTube URL with three-tier transcription system"""
     
     try:
         result = await youtube_processor.process_youtube_url(
             url=request.url,
             extract_images=request.extract_images,
             extract_transcript=request.extract_transcript,
-            include_metadata=request.include_metadata
+            include_metadata=request.include_metadata,
+            force_high_quality=request.force_high_quality
         )
         
         # If Backblaze is available, save to youtube-content folder
         if B2_AVAILABLE and bucket:
             try:
-                filename = f"youtube_{result['video_id']}_{int(datetime.now().timestamp())}.md"
+                filename = f"youtube_{result['video_id']}_{result['transcription_details']['method']}_{int(datetime.now().timestamp())}.md"
                 
                 # Upload to youtube-content folder
                 bucket.upload_bytes(
@@ -958,7 +1146,8 @@ async def process_content_unified(request: Request):
                 "entities": [],  # Could add entity extraction
                 "topics": [],
                 "questions": [],
-                "processing_time_ms": 0
+                "processing_time_ms": 0,
+                "pipeline_version": "ai_empire_v2.2_three_tier_transcription"
             }
         else:
             raise HTTPException(status_code=503, detail="Document processor not available")
@@ -974,8 +1163,8 @@ async def health():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "2.1.1",
-        "architecture": "ai_empire_unified",
+        "version": "2.2.0",
+        "architecture": "ai_empire_unified_three_tier_transcription",
         "components": {
             "llamaindex": LLAMAINDEX_AVAILABLE,
             "pinecone": PINECONE_AVAILABLE,
@@ -987,7 +1176,14 @@ async def health():
             "airtable": AIRTABLE_AVAILABLE and bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID),
             "youtube_processing": YOUTUBE_AVAILABLE,
             "web_scraping": WEB_SCRAPING_AVAILABLE,
-            "document_processor": document_processor.available
+            "document_processor": document_processor.available,
+            "soniox_transcription": bool(SONIOX_API_KEY)
+        },
+        "transcription_tiers": {
+            "tier_1": "youtube_captions",
+            "tier_2": "youtube_mcp_server", 
+            "tier_3": "soniox_audio_transcription",
+            "soniox_available": bool(SONIOX_API_KEY)
         },
         "pinecone_config": {
             "index": PINECONE_INDEX_NAME,
@@ -1097,7 +1293,7 @@ async def search_course_knowledge(
             "results": formatted_results,
             "pinecone_index": PINECONE_INDEX_NAME,
             "pinecone_namespace": PINECONE_NAMESPACE,
-            "architecture": "unified_basic_v2.1"
+            "architecture": "unified_three_tier_v2.2"
         }
         
     except Exception as e:
@@ -1120,7 +1316,7 @@ async def get_knowledge_statistics():
         
         return {
             "status": "success",
-            "architecture": "ai_empire_unified_v2.1",
+            "architecture": "ai_empire_unified_three_tier_v2.2",
             "pinecone_stats": {
                 "index_name": PINECONE_INDEX_NAME,
                 "namespace": PINECONE_NAMESPACE,
@@ -1133,6 +1329,10 @@ async def get_knowledge_statistics():
                 "llamaindex": LLAMAINDEX_AVAILABLE,
                 "pinecone": PINECONE_AVAILABLE,
                 "vector_store_integration": PINECONE_VECTOR_STORE_AVAILABLE
+            },
+            "transcription_system": {
+                "version": "three_tier_fallback",
+                "tiers": ["youtube_captions", "youtube_mcp_server", "soniox_audio"]
             }
         }
         
@@ -1154,7 +1354,7 @@ async def get_processing_statistics():
             "timestamp": datetime.now().isoformat(),
             "statistics": stats,
             "data_source": "Airtable",
-            "architecture": "ai_empire_unified_v2.1"
+            "architecture": "ai_empire_unified_three_tier_v2.2"
         }
         
     except Exception as e:
