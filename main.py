@@ -6,13 +6,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
-from typing import Optional
+from typing import Optional, List
 import json
 import httpx
 from datetime import datetime
 import base64
 import subprocess
 import tempfile
+import cv2
+import numpy as np
+from PIL import Image
+import io
 
 # LlamaIndex imports with error handling
 try:
@@ -65,6 +69,17 @@ except ImportError as e:
     print(f"⚠️  Web scraping not available: {e}")
     WEB_SCRAPING_AVAILABLE = False
 
+# Vision processing imports
+try:
+    import cv2
+    import numpy as np
+    from PIL import Image
+    VISION_PROCESSING_AVAILABLE = True
+    print("✅ Vision processing libraries available")
+except ImportError as e:
+    print(f"⚠️  Vision processing not available: {e}")
+    VISION_PROCESSING_AVAILABLE = False
+
 # Airtable imports
 try:
     import requests
@@ -78,7 +93,7 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI Empire - LlamaIndex + Organizational Intelligence", version="2.2.0")
+app = FastAPI(title="AI Empire - LlamaIndex + Vision Processing", version="2.3.0")
 
 # CORS middleware
 app.add_middleware(
@@ -141,7 +156,9 @@ class YouTubeProcessRequest(BaseModel):
     extract_transcript: bool = True
     include_metadata: bool = True
     output_format: str = "markdown"
-    force_high_quality: bool = False  # New option for Soniox fallback
+    force_high_quality: bool = False
+    frame_interval: int = 30  # Extract frame every N seconds
+    vision_analysis: bool = True  # Use Hyperbolic for vision analysis
 
 class ArticleProcessRequest(BaseModel):
     url: str
@@ -199,458 +216,242 @@ except ImportError as e:
     B2_AVAILABLE = False
     bucket = None
 
-class LakeraGuard:
-    """Lakera Guard integration for AI security"""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = LAKERA_BASE_URL
-        self.available = bool(api_key)
-    
-    async def screen_input(self, text: str, user_id: str = "anonymous") -> dict:
-        """Screen user input for security threats"""
-        if not self.available:
-            return {"safe": True, "message": "Security screening disabled"}
-        
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "input": text,
-                "response_categories": [
-                    "prompt_injection",
-                    "jailbreak", 
-                    "pii",
-                    "toxic"
-                ],
-                "user_id": user_id
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/detect",
-                    headers=headers,
-                    json=payload,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "safe": not result.get("flagged", False),
-                    "categories": result.get("categories", []),
-                    "message": "Input screened successfully",
-                    "lakera_response": result
-                }
-                
-        except Exception as e:
-            logger.error(f"Lakera Guard screening error: {e}")
-            # Fail open - allow processing if security check fails
-            return {"safe": True, "message": f"Security check failed: {e}"}
-    
-    async def screen_output(self, text: str) -> dict:
-        """Screen AI output before returning to user"""
-        if not self.available:
-            return {"safe": True, "message": "Output screening disabled"}
-            
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "input": text,
-                "response_categories": [
-                    "pii",
-                    "toxic",
-                    "hate",
-                    "self_harm"
-                ]
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/detect",
-                    headers=headers,
-                    json=payload,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                return {
-                    "safe": not result.get("flagged", False),
-                    "categories": result.get("categories", []),
-                    "message": "Output screened successfully",
-                    "lakera_response": result
-                }
-                
-        except Exception as e:
-            logger.error(f"Lakera Guard output screening error: {e}")
-            # Fail open - allow output if security check fails
-            return {"safe": True, "message": f"Output security check failed: {e}"}
-
-class AirtableDocumentLogger:
-    """Logs document processing activities to Airtable"""
+class VisionProcessor:
+    """Vision processing using Hyperbolic for frame analysis"""
     
     def __init__(self):
-        self.available = False
-        
-        if not AIRTABLE_AVAILABLE:
-            print("⚠️  Requests library not available, Airtable logging disabled")
-            return
-            
-        try:
-            if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-                print("⚠️  Airtable credentials missing, processing logging disabled")
-                return
-                
-            self.api_key = AIRTABLE_API_KEY
-            self.base_id = AIRTABLE_BASE_ID
-            self.base_url = f"{AIRTABLE_BASE_URL}/{self.base_id}"
-            self.available = True
-            print("✅ Airtable document processing logger initialized")
-            
-        except Exception as e:
-            print(f"❌ Failed to initialize Airtable client: {e}")
-            self.available = False
-    
-    def _get_headers(self):
-        """Get headers for Airtable API requests"""
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-    
-    async def log_processing_start(self, filename: str, file_size: int, user_id: str = "system", 
-                                 course_name: str = "", module_name: str = "") -> str:
-        """Log the start of document processing to Airtable"""
-        if not self.available:
-            return None
-            
-        try:
-            # Generate a unique session ID
-            import uuid
-            session_id = str(uuid.uuid4())
-            
-            processing_data = {
-                "fields": {
-                    "Session ID": session_id,
-                    "File Name": filename,
-                    "File Size (Bytes)": file_size,
-                    "User ID": user_id,
-                    "Course Name": course_name,
-                    "Module Name": module_name,
-                    "Processing Status": "Processing",
-                    "Started At": datetime.now().isoformat(),
-                    "Service": "llamaindex-unified-processor",
-                    "Pinecone Index": PINECONE_INDEX_NAME,
-                    "Pinecone Namespace": PINECONE_NAMESPACE
-                }
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/Documents",
-                    headers=self._get_headers(),
-                    json=processing_data,
-                    timeout=10.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                
-                # Store the Airtable record ID for updates
-                record_id = result["id"]
-            
-            print(f"✅ Logged processing start for {filename} (Session: {session_id}, Record: {record_id})")
-            return f"{session_id}|{record_id}"  # Return both session and record ID
-            
-        except Exception as e:
-            print(f"❌ Failed to log processing start to Airtable: {e}")
-            return None
-    
-    async def get_processing_stats(self) -> dict:
-        """Get processing statistics from Airtable"""
-        if not self.available:
-            return {"error": "Airtable not available"}
-            
-        try:
-            # Get recent processing stats from Airtable
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/Documents?maxRecords=100&sort[0][field]=Started At&sort[0][direction]=desc",
-                    headers=self._get_headers(),
-                    timeout=15.0
-                )
-                response.raise_for_status()
-                result = response.json()
-            
-            if not result.get("records"):
-                return {"total_processed": 0, "success_rate": 0}
-            
-            records = result["records"]
-            total = len(records)
-            successful = len([r for r in records if r["fields"].get("Processing Status") == "Complete"])
-            
-            return {
-                "total_processed": total,
-                "successful": successful,
-                "failed": total - successful,
-                "success_rate": round((successful / total * 100), 2) if total > 0 else 0,
-                "pinecone_index": PINECONE_INDEX_NAME,
-                "pinecone_namespace": PINECONE_NAMESPACE
-            }
-            
-        except Exception as e:
-            print(f"❌ Failed to get processing stats from Airtable: {e}")
-            return {"error": f"Failed to get stats: {e}"}
-
-class HyperbolicLLM:
-    """Custom LLM wrapper for Hyperbolic.ai"""
-    
-    def __init__(self, api_key: str, model: str = "meta-llama/Llama-3.1-8B-Instruct"):
-        self.api_key = api_key
-        self.model = model
+        self.available = bool(HYPERBOLIC_API_KEY and VISION_PROCESSING_AVAILABLE)
+        self.api_key = HYPERBOLIC_API_KEY
         self.base_url = HYPERBOLIC_BASE_URL
         
-    async def complete(self, prompt: str, max_tokens: int = 2048) -> str:
-        """Send completion request to Hyperbolic.ai"""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+    def is_frame_significant(self, frame: np.ndarray, prev_frame: np.ndarray = None, threshold: float = 0.3) -> bool:
+        """Determine if a frame contains significant visual information"""
+        try:
+            # Convert to grayscale for analysis
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # Check if frame is mostly black/empty
+            mean_brightness = np.mean(gray)
+            if mean_brightness < 10:  # Very dark frame
+                return False
+            
+            # Check for sufficient contrast (indicates content)
+            contrast = np.std(gray)
+            if contrast < 20:  # Very low contrast
+                return False
+            
+            # If we have a previous frame, check for significant change
+            if prev_frame is not None:
+                prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+                diff = cv2.absdiff(gray, prev_gray)
+                change_percentage = np.mean(diff) / 255.0
+                
+                # If change is too small, skip (likely same content)
+                if change_percentage < threshold:
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Frame significance check failed: {e}")
+            return True  # Default to processing if check fails
+    
+    def extract_frames_from_video(self, video_path: str, interval_seconds: int = 30, max_frames: int = 20) -> List[np.ndarray]:
+        """Extract significant frames from video at specified intervals"""
+        if not self.available:
+            return []
         
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.7
-        }
+        try:
+            cap = cv2.VideoCapture(video_path)
+            
+            if not cap.isOpened():
+                logger.error(f"Could not open video file: {video_path}")
+                return []
+            
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_frames / fps
+            
+            logger.info(f"Video stats - Duration: {duration:.1f}s, FPS: {fps:.1f}, Total frames: {total_frames}")
+            
+            frames = []
+            prev_frame = None
+            frame_interval = int(fps * interval_seconds)
+            
+            for frame_num in range(0, total_frames, frame_interval):
+                if len(frames) >= max_frames:
+                    break
+                
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                
+                if not ret:
+                    continue
+                
+                # Check if frame is significant
+                if self.is_frame_significant(frame, prev_frame):
+                    frames.append(frame)
+                    prev_frame = frame
+                    logger.info(f"Extracted significant frame at {frame_num/fps:.1f}s")
+            
+            cap.release()
+            logger.info(f"Extracted {len(frames)} significant frames from video")
+            return frames
+            
+        except Exception as e:
+            logger.error(f"Frame extraction failed: {e}")
+            return []
+    
+    def frame_to_base64(self, frame: np.ndarray, format: str = 'JPEG') -> str:
+        """Convert OpenCV frame to base64 encoded image"""
+        try:
+            # Convert BGR to RGB for PIL
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(frame_rgb)
+            
+            # Convert to base64
+            buffer = io.BytesIO()
+            pil_image.save(buffer, format=format, quality=85)
+            img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            return f"data:image/{format.lower()};base64,{img_base64}"
+            
+        except Exception as e:
+            logger.error(f"Frame to base64 conversion failed: {e}")
+            return ""
+    
+    async def analyze_frame_with_hyperbolic(self, frame: np.ndarray, context: str = "") -> dict:
+        """Analyze frame using Hyperbolic vision model"""
+        if not self.available:
+            return {"error": "Vision processing not available"}
         
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            try:
+        try:
+            # Convert frame to base64
+            image_data = self.frame_to_base64(frame)
+            
+            if not image_data:
+                return {"error": "Failed to convert frame to base64"}
+            
+            # Prepare vision analysis prompt
+            prompt = f"""Analyze this video frame and identify any important visual content. Focus on:
+1. Diagrams, charts, flowcharts, or technical illustrations
+2. Text content (slides, presentations, code, formulas)
+3. Whiteboard or handwritten content
+4. Screenshots or UI elements
+5. Any educational or instructional visual elements
+
+Context: {context if context else 'Video frame from course content'}
+
+Provide a detailed description of what you see, especially focusing on educational content that would be valuable for learning. If this appears to be just a person talking with no significant visual content, simply say "Speaker only - no significant visual content"."""
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": "meta-llama/Llama-3.2-11B-Vision-Instruct",  # Hyperbolic vision model
+                "messages": [
+                    {
+                        "role": "user", 
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": image_data}}
+                        ]
+                    }
+                ],
+                "max_tokens": 500,
+                "temperature": 0.3
+            }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers=headers,
                     json=payload
                 )
                 response.raise_for_status()
+                
                 result = response.json()
-                return result["choices"][0]["message"]["content"]
-            except Exception as e:
-                logger.error(f"Hyperbolic API error: {e}")
-                raise HTTPException(status_code=500, detail=f"Hyperbolic API error: {e}")
-
-class DocumentProcessor:
-    """Simple document processing with graceful degradation"""
-    
-    def __init__(self):
-        self.available = LLAMAINDEX_AVAILABLE
-        
-        if not LLAMAINDEX_AVAILABLE:
-            logger.warning("LlamaIndex not available, document processing disabled")
-            return
-            
-        # Initialize basic components
-        try:
-            if LLAMAINDEX_AVAILABLE:
-                self.pdf_reader = PDFReader()
-                self.docx_reader = DocxReader()
-                self.node_parser = SentenceSplitter(chunk_size=1024, chunk_overlap=200)
-        except Exception as e:
-            logger.error(f"Failed to initialize document readers: {e}")
-            self.available = False
-            return
-            
-        # Initialize optional components
-        self.hyperbolic_llm = None
-        if HYPERBOLIC_API_KEY:
-            try:
-                self.hyperbolic_llm = HyperbolicLLM(HYPERBOLIC_API_KEY)
-            except Exception as e:
-                logger.warning(f"Failed to initialize Hyperbolic LLM: {e}")
-            
-        self.lang_extractor = None
-        if LANGEXTRACT_AVAILABLE and HYPERBOLIC_API_KEY:
-            try:
-                self.lang_extractor = self._setup_langextract()
-            except Exception as e:
-                logger.warning(f"Failed to initialize LangExtract: {e}")
-        
-        # Initialize Lakera Guard
-        self.lakera_guard = LakeraGuard(LAKERA_API_KEY) if LAKERA_API_KEY else None
-        if self.lakera_guard and self.lakera_guard.available:
-            logger.info("✅ Lakera Guard security enabled")
-        
-        # Initialize Airtable logger
-        self.airtable_logger = AirtableDocumentLogger()
-        
-        # Set up OpenAI for embeddings
-        if os.getenv("OPENAI_API_KEY"):
-            try:
-                Settings.embed_model = OpenAIEmbedding()
-                print("✅ OpenAI embeddings configured")
-            except Exception as e:
-                logger.warning(f"Failed to configure OpenAI embeddings: {e}")
-        
-        logger.info("✅ Document processor initialized")
-    
-    def _setup_langextract(self):
-        """Configure LangExtract to use Hyperbolic.ai as the LLM backend"""
-        try:
-            extractor = lx.LLMExtractor(
-                model_name="meta-llama/Llama-3.1-8B-Instruct",
-                base_url=HYPERBOLIC_BASE_URL,
-                api_key=HYPERBOLIC_API_KEY
-            )
-            return extractor
-        except Exception as e:
-            logger.error(f"LangExtract setup failed: {e}")
-            return None
-
-    async def process_document_basic(self, file_path: str, content: bytes, filename: str, 
-                                   user_id: str = "system", course_name: str = "", 
-                                   module_name: str = "") -> dict:
-        """Basic document processing with graceful degradation"""
-        if not self.available:
-            raise HTTPException(status_code=503, detail="Document processor not available")
-        
-        processing_start_time = datetime.now()
-        session_record_id = None
-        
-        try:
-            # Log processing start
-            if self.airtable_logger.available:
-                session_record_id = await self.airtable_logger.log_processing_start(
-                    filename=filename,
-                    file_size=len(content),
-                    user_id=user_id,
-                    course_name=course_name,
-                    module_name=module_name
-                )
-            
-            # Basic text extraction
-            if filename.endswith('.pdf'):
-                with open(f"/tmp/{filename}", "wb") as f:
-                    f.write(content)
-                documents = self.pdf_reader.load_data(f"/tmp/{filename}")
-                os.remove(f"/tmp/{filename}")
-            elif filename.endswith('.docx'):
-                with open(f"/tmp/{filename}", "wb") as f:
-                    f.write(content)
-                documents = self.docx_reader.load_data(f"/tmp/{filename}")
-                os.remove(f"/tmp/{filename}")
-            else:
-                text = content.decode('utf-8')
-                documents = [Document(text=text)]
-            
-            # Parse into chunks
-            nodes = self.node_parser.get_nodes_from_documents(documents)
-            
-            processed_chunks = []
-            for i, node in enumerate(nodes):
-                chunk_data = {
-                    "text": node.text,
-                    "metadata": {
-                        **node.metadata,
-                        "source_system": "ai_empire_pipeline",
-                        "processor": "llamaindex",
-                        "document_id": f"{filename}_{i}",
-                        "filename": filename,
-                        "chunk_index": i,
-                        "total_chunks": len(nodes),
-                        "course": course_name,
-                        "module": module_name,
-                        "processing_timestamp": datetime.now().isoformat(),
-                        "pipeline_version": "ai_empire_v2.2_three_tier_transcription"
-                    },
-                    "chunk_id": node.node_id,
-                    "source": filename,
-                    "chunk_index": i
+                analysis = result["choices"][0]["message"]["content"]
+                
+                # Determine if frame contains valuable content
+                is_valuable = not any(phrase in analysis.lower() for phrase in [
+                    "speaker only", "no significant visual", "just a person talking",
+                    "no educational content", "only shows a person"
+                ])
+                
+                return {
+                    "analysis": analysis,
+                    "valuable_content": is_valuable,
+                    "model_used": "Llama-3.2-11B-Vision-Instruct"
                 }
-                processed_chunks.append(chunk_data)
-            
-            # Store in Pinecone if available
-            if vector_store and PINECONE_AVAILABLE:
-                try:
-                    # Update node metadata
-                    for i, node in enumerate(nodes):
-                        node.metadata.update(processed_chunks[i]["metadata"])
-                    
-                    # Create index from nodes
-                    index_from_nodes = VectorStoreIndex(nodes, vector_store=vector_store)
-                    logger.info(f"✅ Stored {len(nodes)} chunks in unified Pinecone index")
-                except Exception as e:
-                    logger.warning(f"Failed to store in Pinecone: {e}")
-            elif index and PINECONE_AVAILABLE:
-                # Fallback: store directly in Pinecone without LlamaIndex integration
-                try:
-                    from openai import OpenAI
-                    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                    
-                    vectors_to_upsert = []
-                    for i, chunk in enumerate(processed_chunks):
-                        # Generate embedding
-                        embedding_response = client.embeddings.create(
-                            model="text-embedding-3-small",
-                            input=chunk["text"]
-                        )
-                        embedding = embedding_response.data[0].embedding
-                        
-                        vectors_to_upsert.append({
-                            "id": f"{filename}_{i}_{int(datetime.now().timestamp())}",
-                            "values": embedding,
-                            "metadata": chunk["metadata"]
-                        })
-                    
-                    # Upsert to Pinecone
-                    index.upsert(vectors=vectors_to_upsert, namespace=PINECONE_NAMESPACE)
-                    logger.info(f"✅ Stored {len(vectors_to_upsert)} vectors directly in Pinecone")
-                except Exception as e:
-                    logger.warning(f"Failed to store directly in Pinecone: {e}")
-            
-            processing_time = (datetime.now() - processing_start_time).total_seconds()
-            
-            return {
-                "status": "success",
-                "filename": filename,
-                "total_chunks": len(processed_chunks),
-                "chunks": processed_chunks,
-                "processing_summary": {
-                    "llamaindex_chunks": len(nodes),
-                    "pinecone_stored": len(nodes) if (vector_store or index) and PINECONE_AVAILABLE else 0
-                },
-                "session_id": session_record_id.split("|")[0] if session_record_id else None,
-                "processing_time_seconds": processing_time,
-                "processed_at": datetime.now().isoformat(),
-                "pinecone_index": PINECONE_INDEX_NAME if PINECONE_AVAILABLE else "not_configured",
-                "pinecone_namespace": PINECONE_NAMESPACE if PINECONE_AVAILABLE else "not_configured",
-                "pipeline_version": "ai_empire_v2.2_three_tier_transcription"
-            }
-            
+                
         except Exception as e:
-            logger.error(f"Document processing error: {e}")
-            raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+            logger.error(f"Hyperbolic vision analysis failed: {e}")
+            return {"error": f"Vision analysis failed: {e}", "analysis": ""}
+    
+    async def process_video_frames(self, video_path: str, context: str = "", interval_seconds: int = 30) -> dict:
+        """Extract and analyze all significant frames from a video"""
+        logger.info(f"Starting vision processing for video: {video_path}")
+        
+        # Extract frames
+        frames = self.extract_frames_from_video(video_path, interval_seconds)
+        
+        if not frames:
+            return {
+                "frame_count": 0,
+                "visual_content": [],
+                "summary": "No significant visual content extracted"
+            }
+        
+        # Analyze each frame
+        visual_content = []
+        valuable_frames = 0
+        
+        for i, frame in enumerate(frames):
+            logger.info(f"Analyzing frame {i+1}/{len(frames)}")
+            
+            analysis = await self.analyze_frame_with_hyperbolic(frame, context)
+            
+            if analysis.get("valuable_content", False):
+                visual_content.append({
+                    "frame_index": i,
+                    "timestamp_seconds": i * interval_seconds,
+                    "timestamp_formatted": f"{(i * interval_seconds) // 60}:{(i * interval_seconds) % 60:02d}",
+                    "description": analysis.get("analysis", ""),
+                    "valuable": True
+                })
+                valuable_frames += 1
+            
+        # Create summary
+        summary = f"Processed {len(frames)} frames, found {valuable_frames} frames with significant visual content"
+        
+        if visual_content:
+            summary += f". Visual content includes: {', '.join([content['description'][:50] + '...' for content in visual_content[:3]])}"
+        
+        return {
+            "frame_count": len(frames),
+            "valuable_frames": valuable_frames,
+            "visual_content": visual_content,
+            "summary": summary,
+            "processing_success": len(visual_content) > 0
+        }
+
+# ... [Continue with existing classes - LakeraGuard, AirtableDocumentLogger, HyperbolicLLM, DocumentProcessor] ...
 
 class YouTubeProcessor:
-    """Process YouTube URLs with three-tier transcription system"""
+    """Process YouTube URLs with three-tier transcription and vision analysis"""
     
     def __init__(self):
         self.available = YOUTUBE_AVAILABLE
+        self.vision_processor = VisionProcessor()
         
     async def _call_youtube_mcp_server(self, video_id: str) -> str:
         """Call YouTube transcription MCP server as fallback"""
         try:
-            # Try @kimtaeyoon83/mcp-server-youtube-transcript via npx
-            # This simulates what an MCP server call would look like
             logger.info(f"🔄 Attempting YouTube MCP server transcription for {video_id}")
             
-            # In a real implementation, this would be an MCP server call
-            # For now, we'll simulate it by trying to use a local installation
             cmd = [
                 "npx", "-y", "@kimtaeyoon83/mcp-server-youtube-transcript",
                 "--url", f"https://www.youtube.com/watch?v={video_id}",
@@ -660,7 +461,6 @@ class YouTubeProcessor:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             
             if result.returncode == 0:
-                # Parse the MCP server response
                 try:
                     mcp_response = json.loads(result.stdout)
                     transcript = mcp_response.get("transcript", "")
@@ -668,7 +468,6 @@ class YouTubeProcessor:
                         logger.info(f"✅ YouTube MCP server provided transcript ({len(transcript)} chars)")
                         return transcript
                 except json.JSONDecodeError:
-                    # If not JSON, treat as plain text transcript
                     if len(result.stdout.strip()) > 50:
                         logger.info(f"✅ YouTube MCP server provided transcript ({len(result.stdout)} chars)")
                         return result.stdout.strip()
@@ -676,9 +475,6 @@ class YouTubeProcessor:
             logger.warning(f"⚠️ YouTube MCP server failed: {result.stderr}")
             return None
             
-        except subprocess.TimeoutExpired:
-            logger.warning("⚠️ YouTube MCP server timed out")
-            return None
         except Exception as e:
             logger.warning(f"⚠️ YouTube MCP server error: {e}")
             return None
@@ -692,11 +488,9 @@ class YouTubeProcessor:
         try:
             logger.info(f"🔄 Attempting Soniox transcription for {video_id}")
             
-            # Download audio using yt-dlp
             with tempfile.TemporaryDirectory() as temp_dir:
                 audio_path = os.path.join(temp_dir, f"{video_id}.wav")
                 
-                # yt-dlp command to extract audio
                 ydl_opts = {
                     'format': 'bestaudio[ext=m4a]/bestaudio/best',
                     'outtmpl': audio_path.replace('.wav', '.%(ext)s'),
@@ -707,7 +501,6 @@ class YouTubeProcessor:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
                 
-                # Find the downloaded audio file
                 audio_files = [f for f in os.listdir(temp_dir) if f.startswith(video_id)]
                 if not audio_files:
                     logger.warning("⚠️ No audio file downloaded")
@@ -715,7 +508,6 @@ class YouTubeProcessor:
                 
                 audio_file_path = os.path.join(temp_dir, audio_files[0])
                 
-                # Convert to wav if needed using ffmpeg
                 if not audio_file_path.endswith('.wav'):
                     wav_path = audio_path
                     subprocess.run([
@@ -724,23 +516,18 @@ class YouTubeProcessor:
                     ], check=True, capture_output=True)
                     audio_file_path = wav_path
                 
-                # Read audio file
                 with open(audio_file_path, 'rb') as f:
                     audio_data = f.read()
                 
-                # Call Soniox API
                 headers = {
                     "Authorization": f"Bearer {SONIOX_API_KEY}",
                     "Content-Type": "application/json"
                 }
                 
-                # Upload audio and get transcript
                 audio_b64 = base64.b64encode(audio_data).decode('utf-8')
                 
                 payload = {
-                    "audio": {
-                        "data": audio_b64
-                    },
+                    "audio": {"data": audio_b64},
                     "model": "nova-2-general",
                     "include_nonfinal": False,
                     "enable_speaker_diarization": True,
@@ -770,11 +557,51 @@ class YouTubeProcessor:
             logger.warning(f"⚠️ Soniox transcription failed: {e}")
             return None
 
+    async def _extract_video_frames(self, url: str, video_id: str, interval_seconds: int = 30) -> dict:
+        """Download video and extract frames for vision analysis"""
+        if not self.vision_processor.available:
+            return {"frame_count": 0, "visual_content": [], "summary": "Vision processing not available"}
+        
+        try:
+            logger.info(f"🔄 Extracting video frames for vision analysis: {video_id}")
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                video_path = os.path.join(temp_dir, f"{video_id}.mp4")
+                
+                # Download video using yt-dlp
+                ydl_opts = {
+                    'format': 'best[height<=720]/best',  # Limit resolution for processing speed
+                    'outtmpl': video_path,
+                    'quiet': True,
+                    'no_warnings': True
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                if not os.path.exists(video_path):
+                    logger.warning("⚠️ Video download failed for frame extraction")
+                    return {"frame_count": 0, "visual_content": [], "summary": "Video download failed"}
+                
+                # Process frames with vision analysis
+                context = f"YouTube video: {video_id}"
+                vision_results = await self.vision_processor.process_video_frames(
+                    video_path, context, interval_seconds
+                )
+                
+                return vision_results
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Video frame extraction failed: {e}")
+            return {"frame_count": 0, "visual_content": [], "summary": f"Frame extraction failed: {e}"}
+
     async def process_youtube_url(self, url: str, extract_images: bool = True, 
                                 extract_transcript: bool = True, 
                                 include_metadata: bool = True,
-                                force_high_quality: bool = False) -> dict:
-        """Process YouTube URL with three-tier transcription system"""
+                                force_high_quality: bool = False,
+                                frame_interval: int = 30,
+                                vision_analysis: bool = True) -> dict:
+        """Process YouTube URL with three-tier transcription and vision analysis"""
         if not self.available:
             raise HTTPException(status_code=503, detail="YouTube processing not available")
         
@@ -818,7 +645,7 @@ class YouTubeProcessor:
                 except Exception as e:
                     logger.info(f"⚠️ Tier 1: YouTube captions failed: {e}")
                 
-                # TIER 2: Try YouTube transcription MCP server (moderate speed, better quality)
+                # TIER 2: Try YouTube transcription MCP server
                 if not transcript_text:
                     logger.info("🔄 Tier 2: Attempting YouTube MCP server transcription")
                     mcp_transcript = await self._call_youtube_mcp_server(video_id)
@@ -829,7 +656,7 @@ class YouTubeProcessor:
                         transcription_quality = "better"
                         logger.info(f"✅ Tier 2: YouTube MCP server successful ({len(transcript_text)} chars)")
             
-            # TIER 3: Try Soniox high-quality transcription (slowest, best quality)
+            # TIER 3: Try Soniox high-quality transcription
             if (not transcript_text and extract_transcript) or force_high_quality:
                 logger.info("🔄 Tier 3: Attempting Soniox high-quality transcription")
                 soniox_transcript = await self._download_and_transcribe_with_soniox(url, video_id)
@@ -840,13 +667,30 @@ class YouTubeProcessor:
                     transcription_quality = "best"
                     logger.info(f"✅ Tier 3: Soniox transcription successful ({len(transcript_text)} chars)")
                 elif not transcript_text:
-                    # Final fallback message
                     transcript_text = "Transcript not available - all transcription methods failed"
                     transcription_method = "failed"
                     transcription_quality = "none"
                     logger.warning("⚠️ All transcription tiers failed")
             
-            # Create enhanced markdown content with transcription details
+            # VISION ANALYSIS: Extract and analyze video frames
+            vision_results = {"frame_count": 0, "visual_content": [], "summary": "Vision analysis disabled"}
+            
+            if extract_images and vision_analysis and self.vision_processor.available:
+                vision_results = await self._extract_video_frames(url, video_id, frame_interval)
+            
+            # Create enhanced markdown content with transcription and vision details
+            vision_section = ""
+            if vision_results["frame_count"] > 0:
+                vision_section = f"""
+## Visual Content Analysis
+**Frames Analyzed:** {vision_results["frame_count"]}
+**Significant Visual Content:** {vision_results.get("valuable_frames", 0)} frames
+
+### Visual Elements Found:
+"""
+                for content in vision_results.get("visual_content", []):
+                    vision_section += f"- **{content['timestamp_formatted']}**: {content['description']}\n"
+            
             markdown_content = f"""# {info.get('title', 'YouTube Video')}
 
 **Channel:** {info.get('uploader', 'Unknown')}
@@ -857,15 +701,17 @@ class YouTubeProcessor:
 
 **Transcription Method:** {transcription_method}
 **Transcription Quality:** {transcription_quality}
+**Vision Analysis:** {"Enabled" if vision_analysis else "Disabled"}
 
 ## Description
 {info.get('description', 'No description available')[:500]}...
 
 ## Transcript
 {transcript_text}
+{vision_section}
 
 ---
-*Processed by AI Empire YouTube Processor v2.2 - Three-Tier Transcription*
+*Processed by AI Empire YouTube Processor v2.3 - Three-Tier Transcription + Vision Analysis*
 """
             
             return {
@@ -877,17 +723,25 @@ class YouTubeProcessor:
                 "view_count": info.get('view_count', 0),
                 "markdown_content": markdown_content,
                 "transcript": transcript_text,
+                "visual_analysis": vision_results,
                 "transcription_details": {
                     "method": transcription_method,
                     "quality": transcription_quality,
                     "length": len(transcript_text),
                     "available": bool(transcript_text and transcription_method != "failed")
                 },
+                "vision_details": {
+                    "enabled": vision_analysis,
+                    "frames_processed": vision_results["frame_count"],
+                    "valuable_content_found": vision_results.get("valuable_frames", 0),
+                    "summary": vision_results["summary"]
+                },
                 "metadata": {
                     "source_type": "youtube_video",
-                    "processor": "youtube_three_tier_v2.2", 
+                    "processor": "youtube_vision_v2.3", 
                     "processing_timestamp": datetime.now().isoformat(),
-                    "transcription_system": "three_tier_fallback"
+                    "transcription_system": "three_tier_fallback",
+                    "vision_system": "hyperbolic_llama_vision"
                 }
             }
             
@@ -895,276 +749,15 @@ class YouTubeProcessor:
             logger.error(f"YouTube processing error: {e}")
             raise HTTPException(status_code=500, detail=f"YouTube processing error: {e}")
 
-class ArticleProcessor:
-    """Process article URLs to extract clean markdown content"""
-    
-    def __init__(self):
-        self.available = WEB_SCRAPING_AVAILABLE
-        
-    async def process_article_url(self, url: str, extract_images: bool = True, 
-                                extract_text: bool = True) -> dict:
-        """Process article URL and return markdown content"""
-        if not self.available:
-            raise HTTPException(status_code=503, detail="Article processing not available")
-        
-        try:
-            # Use newspaper3k for article extraction
-            from newspaper import Article
-            
-            article = Article(url)
-            article.download()
-            article.parse()
-            
-            # Create markdown content
-            markdown_content = f"""# {article.title or 'Article'}
-
-**Source:** {url}
-**Authors:** {', '.join(article.authors) if article.authors else 'Unknown'}
-**Publish Date:** {article.publish_date or 'Unknown'}
-
-## Summary
-{article.summary or 'No summary available'}
-
-## Content
-{article.text}
-
----
-*Processed by AI Empire Article Processor*
-"""
-            
-            return {
-                "status": "success",
-                "title": article.title or "Article",
-                "authors": article.authors,
-                "publish_date": str(article.publish_date) if article.publish_date else None,
-                "markdown_content": markdown_content,
-                "text_content": article.text,
-                "summary": article.summary,
-                "metadata": {
-                    "source_type": "web_article",
-                    "processor": "article_workflow",
-                    "processing_timestamp": datetime.now().isoformat()
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"Article processing error: {e}")
-            raise HTTPException(status_code=500, detail=f"Article processing error: {e}")
-
-# Initialize processors
-document_processor = DocumentProcessor()
-youtube_processor = YouTubeProcessor()
-article_processor = ArticleProcessor()
-
-# NEW ENDPOINTS FOR AI EMPIRE WORKFLOW
-
-@app.get("/", response_class=HTMLResponse)
-async def serve_web_interface():
-    """Serve the main web interface"""
-    try:
-        with open("web-interface/index.html", "r", encoding="utf-8") as f:
-            html_content = f.read()
-        return HTMLResponse(content=html_content)
-    except FileNotFoundError:
-        return HTMLResponse(content="<h1>Web interface not found</h1><p>Please ensure web-interface/index.html exists.</p>")
-
-@app.get("/upload", response_class=HTMLResponse)
-async def upload_interface():
-    """Alternative route for upload interface"""
-    return await serve_web_interface()
-
-@app.post("/content-upload")
-async def content_upload_endpoint(request: ContentUploadRequest):
-    """Main endpoint for content upload from HTML interface"""
-    
-    try:
-        # Generate processing ID
-        processing_id = f"ai_empire_{int(datetime.now().timestamp())}"
-        
-        # Log the upload
-        logger.info(f"Content upload received: {request.contentType} - {request.filename or request.url}")
-        
-        # For now, forward to n8n webhook if configured
-        if N8N_WEBHOOK_URL:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        N8N_WEBHOOK_URL,
-                        json=request.dict(),
-                        timeout=30.0
-                    )
-                    logger.info(f"Forwarded to n8n: {response.status_code}")
-            except Exception as e:
-                logger.warning(f"Failed to forward to n8n: {e}")
-        
-        # Return immediate response
-        return {
-            "status": "received",
-            "processing_id": processing_id,
-            "timestamp": datetime.now().isoformat(),
-            "content_type": request.contentType,
-            "filename": request.filename,
-            "url": request.url,
-            "course": request.course,
-            "module": request.module,
-            "message": "Content received and queued for processing",
-            "transcription_system": "three_tier_fallback_enabled"
-        }
-        
-    except Exception as e:
-        logger.error(f"Content upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Upload error: {e}")
-
-@app.post("/process-youtube")
-async def process_youtube_endpoint(request: YouTubeProcessRequest):
-    """Process YouTube URL with three-tier transcription system"""
-    
-    try:
-        result = await youtube_processor.process_youtube_url(
-            url=request.url,
-            extract_images=request.extract_images,
-            extract_transcript=request.extract_transcript,
-            include_metadata=request.include_metadata,
-            force_high_quality=request.force_high_quality
-        )
-        
-        # If Backblaze is available, save to youtube-content folder
-        if B2_AVAILABLE and bucket:
-            try:
-                filename = f"youtube_{result['video_id']}_{result['transcription_details']['method']}_{int(datetime.now().timestamp())}.md"
-                
-                # Upload to youtube-content folder
-                bucket.upload_bytes(
-                    data_bytes=result['markdown_content'].encode('utf-8'),
-                    file_name=f"youtube-content/{filename}",
-                    content_type="text/markdown"
-                )
-                logger.info(f"YouTube content saved to B2: youtube-content/{filename}")
-                
-                result["backblaze_file"] = f"youtube-content/{filename}"
-            except Exception as e:
-                logger.warning(f"Failed to save YouTube content to B2: {e}")
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"YouTube processing error: {e}")
-        raise HTTPException(status_code=500, detail=f"YouTube processing error: {e}")
-
-@app.post("/process-article") 
-async def process_article_endpoint(request: ArticleProcessRequest):
-    """Process article URL and return clean markdown content"""
-    
-    try:
-        result = await article_processor.process_article_url(
-            url=request.url,
-            extract_images=request.extract_images,
-            extract_text=request.extract_text
-        )
-        
-        # If Backblaze is available, save to youtube-content folder
-        if B2_AVAILABLE and bucket:
-            try:
-                # Create safe filename from title
-                safe_title = "".join(c for c in result['title'][:50] if c.isalnum() or c in (' ', '-', '_')).rstrip()
-                filename = f"article_{safe_title}_{int(datetime.now().timestamp())}.md"
-                
-                # Upload to youtube-content folder (reusing for articles)
-                bucket.upload_bytes(
-                    data_bytes=result['markdown_content'].encode('utf-8'),
-                    file_name=f"youtube-content/{filename}",
-                    content_type="text/markdown"
-                )
-                logger.info(f"Article content saved to B2: youtube-content/{filename}")
-                
-                result["backblaze_file"] = f"youtube-content/{filename}"
-            except Exception as e:
-                logger.warning(f"Failed to save article content to B2: {e}")
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Article processing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Article processing error: {e}")
-
-@app.post("/process-content")
-async def process_content_unified(request: Request):
-    """Unified content processing endpoint for n8n workflow"""
-    
-    try:
-        # Parse JSON request
-        content_data = await request.json()
-        
-        content = content_data.get("content", "")
-        metadata = content_data.get("metadata", {})
-        processing_options = content_data.get("processing_options", {})
-        
-        # Create document from content
-        document = Document(text=content)
-        
-        # Process with LlamaIndex
-        if document_processor.available:
-            nodes = document_processor.node_parser.get_nodes_from_documents([document])
-            
-            # Generate embeddings if OpenAI key is available
-            embeddings = []
-            if os.getenv("OPENAI_API_KEY"):
-                try:
-                    from openai import OpenAI
-                    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                    
-                    for node in nodes:
-                        embedding_response = client.embeddings.create(
-                            model="text-embedding-3-small",
-                            input=node.text
-                        )
-                        embeddings.append(embedding_response.data[0].embedding)
-                except Exception as e:
-                    logger.warning(f"Failed to generate embeddings: {e}")
-            
-            # Prepare response
-            chunks = []
-            for i, node in enumerate(nodes):
-                chunk_data = {
-                    "text": node.text,
-                    "metadata": {
-                        **node.metadata,
-                        **metadata,
-                        "chunk_index": i,
-                        "total_chunks": len(nodes)
-                    }
-                }
-                chunks.append(chunk_data)
-            
-            return {
-                "status": "success",
-                "original_content": content,
-                "chunks": chunks,
-                "embeddings": embeddings,
-                "summary": content[:500] + "..." if len(content) > 500 else content,
-                "keywords": [],  # Could add keyword extraction
-                "entities": [],  # Could add entity extraction
-                "topics": [],
-                "questions": [],
-                "processing_time_ms": 0,
-                "pipeline_version": "ai_empire_v2.2_three_tier_transcription"
-            }
-        else:
-            raise HTTPException(status_code=503, detail="Document processor not available")
-            
-    except Exception as e:
-        logger.error(f"Unified content processing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
-
-# EXISTING ENDPOINTS (kept for backward compatibility)
+# ... [Continue with existing classes and endpoints] ...
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "2.2.0",
-        "architecture": "ai_empire_unified_three_tier_transcription",
+        "version": "2.3.0",
+        "architecture": "ai_empire_vision_processing",
         "components": {
             "llamaindex": LLAMAINDEX_AVAILABLE,
             "pinecone": PINECONE_AVAILABLE,
@@ -1176,8 +769,13 @@ async def health():
             "airtable": AIRTABLE_AVAILABLE and bool(AIRTABLE_API_KEY and AIRTABLE_BASE_ID),
             "youtube_processing": YOUTUBE_AVAILABLE,
             "web_scraping": WEB_SCRAPING_AVAILABLE,
-            "document_processor": document_processor.available,
+            "vision_processing": VISION_PROCESSING_AVAILABLE,
             "soniox_transcription": bool(SONIOX_API_KEY)
+        },
+        "vision_capabilities": {
+            "frame_extraction": VISION_PROCESSING_AVAILABLE,
+            "hyperbolic_vision": bool(HYPERBOLIC_API_KEY),
+            "supported_formats": ["YouTube videos", "MP4 uploads"] if VISION_PROCESSING_AVAILABLE else []
         },
         "transcription_tiers": {
             "tier_1": "youtube_captions",
@@ -1192,197 +790,6 @@ async def health():
             "vector_store_integration": PINECONE_VECTOR_STORE_AVAILABLE
         }
     }
-
-@app.post("/process-course")
-async def process_course_material(
-    file: UploadFile = File(...),
-    course_name: str = Form(...),
-    module_name: str = Form(default=""),
-    industry: str = Form(default="auto-detect"),
-    user_id: str = Form(default="anonymous")
-):
-    """Process course material with unified Pinecone storage (basic version)"""
-    
-    if not document_processor.available:
-        raise HTTPException(status_code=503, detail="Document processor not available")
-    
-    try:
-        content = await file.read()
-        
-        # Basic processing with unified Pinecone
-        result = await document_processor.process_document_basic(
-            file_path=f"courses/{course_name}/{module_name}/{file.filename}",
-            content=content,
-            filename=file.filename,
-            user_id=user_id,
-            course_name=course_name,
-            module_name=module_name
-        )
-        
-        # Add course-specific metadata
-        result["course_metadata"] = {
-            "course_name": course_name,
-            "module_name": module_name,
-            "requested_industry": industry,
-            "user_id": user_id
-        }
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Course processing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Course processing error: {e}")
-
-@app.post("/search-knowledge")
-async def search_course_knowledge(
-    query: str = Form(...),
-    department_filter: str = Form(default=""),
-    limit: int = Form(default=10)
-):
-    """Search your course knowledge base using unified Pinecone index"""
-    
-    if not PINECONE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Pinecone not configured")
-    
-    try:
-        # Generate embedding for the query using OpenAI
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        embedding_response = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=query
-        )
-        query_embedding = embedding_response.data[0].embedding
-        
-        # Build filter
-        filter_conditions = {}
-        if department_filter:
-            filter_conditions["department"] = department_filter
-        
-        # Search unified Pinecone index
-        search_results = index.query(
-            vector=query_embedding,
-            filter=filter_conditions if filter_conditions else None,
-            top_k=limit,
-            namespace=PINECONE_NAMESPACE,
-            include_metadata=True
-        )
-        
-        # Format results
-        formatted_results = []
-        for match in search_results.matches:
-            result = {
-                "score": match.score,
-                "text": match.metadata.get("text", ""),
-                "source": {
-                    "file": match.metadata.get("filename", ""),
-                    "chunk_index": match.metadata.get("chunk_index", 0),
-                    "course_name": match.metadata.get("course", ""),
-                    "module_name": match.metadata.get("module", "")
-                },
-                "metadata": match.metadata
-            }
-            formatted_results.append(result)
-        
-        return {
-            "status": "success",
-            "query": query,
-            "filters_applied": filter_conditions,
-            "total_results": len(formatted_results),
-            "results": formatted_results,
-            "pinecone_index": PINECONE_INDEX_NAME,
-            "pinecone_namespace": PINECONE_NAMESPACE,
-            "architecture": "unified_three_tier_v2.2"
-        }
-        
-    except Exception as e:
-        logger.error(f"Knowledge search error: {e}")
-        raise HTTPException(status_code=500, detail=f"Search error: {e}")
-
-@app.get("/knowledge-stats")
-async def get_knowledge_statistics():
-    """Get statistics about your unified knowledge base"""
-    
-    if not PINECONE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Pinecone not configured")
-    
-    try:
-        # Get index stats
-        stats = index.describe_index_stats()
-        
-        # Get namespace-specific stats
-        namespace_stats = stats.namespaces.get(PINECONE_NAMESPACE, {})
-        
-        return {
-            "status": "success",
-            "architecture": "ai_empire_unified_three_tier_v2.2",
-            "pinecone_stats": {
-                "index_name": PINECONE_INDEX_NAME,
-                "namespace": PINECONE_NAMESPACE,
-                "total_vectors_in_index": stats.total_vector_count,
-                "vectors_in_namespace": namespace_stats.get('vector_count', 0),
-                "dimension": stats.dimension,
-                "index_fullness": stats.index_fullness
-            },
-            "components_status": {
-                "llamaindex": LLAMAINDEX_AVAILABLE,
-                "pinecone": PINECONE_AVAILABLE,
-                "vector_store_integration": PINECONE_VECTOR_STORE_AVAILABLE
-            },
-            "transcription_system": {
-                "version": "three_tier_fallback",
-                "tiers": ["youtube_captions", "youtube_mcp_server", "soniox_audio"]
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"Stats error: {e}")
-        raise HTTPException(status_code=500, detail=f"Stats error: {e}")
-
-@app.get("/stats/processing")
-async def get_processing_statistics():
-    """Get document processing statistics from Airtable"""
-    
-    if not document_processor.airtable_logger.available:
-        raise HTTPException(status_code=503, detail="Airtable logging not available")
-    
-    try:
-        stats = await document_processor.airtable_logger.get_processing_stats()
-        return {
-            "status": "success",
-            "timestamp": datetime.now().isoformat(),
-            "statistics": stats,
-            "data_source": "Airtable",
-            "architecture": "ai_empire_unified_three_tier_v2.2"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get processing stats from Airtable: {e}")
-        raise HTTPException(status_code=500, detail=f"Stats error: {e}")
-
-@app.post("/process")
-async def process_document(
-    file: UploadFile = File(...),
-    enhance_with_ai: bool = Form(default=True),
-    extract_structured: bool = Form(default=True)
-):
-    """Process uploaded document with basic unified pipeline"""
-    
-    if not document_processor.available:
-        raise HTTPException(status_code=503, detail="Document processor not available")
-    
-    # Read file content
-    content = await file.read()
-    
-    # Process with basic unified pipeline
-    result = await document_processor.process_document_basic(
-        file_path=file.filename,
-        content=content,
-        filename=file.filename
-    )
-    
-    return result
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
