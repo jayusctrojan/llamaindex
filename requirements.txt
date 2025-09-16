@@ -12,10 +12,12 @@ llama-index-embeddings-openai
 llama-index-readers-file
 llama-index-vector-stores-pinecone
 
-# Document processing
+# Document processing (enhanced for parallel image extraction)
 PyPDF2
 python-docx
 pypdf
+PyMuPDF  # fitz for PDF image extraction
+python-pptx  # PowerPoint processing
 
 # LangExtract for structured extraction with source grounding
 langextract
@@ -33,12 +35,12 @@ requests
 yt-dlp
 youtube-transcript-api
 
-# Vision processing for frame extraction and analysis
+# Vision processing for frame extraction and analysis (enhanced)
 opencv-python
 pillow
 numpy
 
-# Web scraping for article processing  
+# Web scraping for article processing with image extraction
 beautifulsoup4
 newspaper3k
 
@@ -46,6 +48,11 @@ newspaper3k
 openai
 httpx
 
+# Document image extraction dependencies
+docx2txt  # Additional DOCX text extraction
+
 # Additional utilities
 pydantic
 python-dotenv
+asyncio
+concurrent.futures
