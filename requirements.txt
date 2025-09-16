@@ -29,8 +29,13 @@ b2sdk
 # Airtable for document tracking (replaces Supabase)
 requests
 
-# YouTube processing
+# YouTube processing with three-tier transcription
 yt-dlp
+youtube-transcript-api
+
+# Web scraping for article processing  
+beautifulsoup4
+newspaper3k
 
 # OpenAI and Hyperbolic integration
 openai
