@@ -54,5 +54,3 @@ docx2txt  # Additional DOCX text extraction
 # Additional utilities
 pydantic
 python-dotenv
-asyncio
-concurrent.futures
