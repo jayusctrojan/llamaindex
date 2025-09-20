@@ -51,6 +51,10 @@ httpx
 # Document image extraction dependencies
 docx2txt  # Additional DOCX text extraction
 
+# 📊 MONITORING DEPENDENCIES
+prometheus-client  # Prometheus metrics collection
+psutil  # System resource monitoring
+
 # Additional utilities
 pydantic
 python-dotenv
