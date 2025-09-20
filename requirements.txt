@@ -55,6 +55,23 @@ docx2txt  # Additional DOCX text extraction
 prometheus-client  # Prometheus metrics collection
 psutil  # System resource monitoring
 
+# ========================================
+# HYBRID APPROACH DEPENDENCIES (NEW)
+# ========================================
+
+# SQL Database for record management
+asyncpg  # Async PostgreSQL client
+psycopg2-binary  # PostgreSQL adapter
+
+# HTTP client for async operations
+aiohttp
+
+# Supabase client (for hybrid SQL operations)
+supabase
+
+# Reranking for hybrid search
+cohere  # Cohere reranking API
+
 # Additional utilities
-pydantic
 python-dotenv
+pydantic
